@@ -17,16 +17,20 @@ from pathlib import Path
 def enviar_telegram(mensaje):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    print("DEBUG token:", "OK" if token else "NONE")
+    print("DEBUG chat_id:", chat_id)
+
     if not token or not chat_id:
         print("⚠️ Telegram no configurado")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    r = requests.post(url, data={
-        "chat_id": chat_id,
-        "text": mensaje
-    })
+    r = requests.post(url, data={"chat_id": chat_id, "text": mensaje})
+
     print("📨 Telegram status:", r.status_code)
+    print("📨 Telegram response:", r.text)
+
 
 warnings.filterwarnings('ignore')
 
@@ -855,8 +859,9 @@ class SistemaTradingTicker:
 # ============================================
 
 def main():
-    """Ejecuta el sistema completo"""
+    enviar_telegram("🧪 BOT ARRANCÓ EN GITHUB ACTIONS")
     print("=" * 80)
+
     print("🚀 SISTEMA DE TRADING MEJORADO")
     print("=" * 80)
     
