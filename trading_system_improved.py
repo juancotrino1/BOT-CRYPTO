@@ -33,9 +33,8 @@ class TradingConfig:
     
     # Activos
     ACTIVOS = [
-        "BTC-USD", "ETH-USD", "DOGE-USD", "ADA-USD", 
-        "BNB-USD", "SOL-USD", "LINK-USD", "XLM-USD", 
-        "HBAR-USD", "AVAX-USD", "SUI20947-USD"
+        "BTC-USD", "ETH-USD","BNB-USD",
+        "SOL-USD", "LINK-USD", "SUI20947-USD"
     ]
     
     # Parámetros técnicos
@@ -46,7 +45,7 @@ class TradingConfig:
     RSI_PERIODO = 14
     
     # Horizontes de predicción (CORREGIDO - más cortos)
-    HORIZONTES = [1, 2, 4, 6, 8]  # En horas
+    HORIZONTES = [4, 8, 12, 24, 48]  # En horas
     
     # Gestión de riesgo
     MULTIPLICADOR_SL = 2.0
