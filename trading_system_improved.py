@@ -12,7 +12,17 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, precision_score, recall_score, classification_report
 import joblib
 from pathlib import Path
+import json
 
+def cargar_ultima_senal():
+    if os.path.exists("ultima_senal.json"):
+        with open("ultima_senal.json") as f:
+            return json.load(f)
+    return None
+
+def guardar_ultima_senal(senal):
+    with open("ultima_senal.json", "w") as f:
+        json.dump(senal, f)
 
 def enviar_telegram(mensaje):
     token = os.getenv("TELEGRAM_TOKEN")
@@ -905,27 +915,46 @@ def main():
         # 5. Análisis tiempo real (solo si es viable)
         señal_actual = None
         if viable:
-            señal_actual = sistema.analizar_tiempo_real()
-            if señal_actual and señal_actual['confianza'] >= TradingConfig.UMBRAL_CONFIANZA_MIN:
-                print(f"\n  🚨 SEÑAL DETECTADA:")
-                print(f"    Dirección: {señal_actual['señal']}")
-                print(f"    Probabilidad: {señal_actual['probabilidad']:.2%}")
-                print(f"    Confianza: {señal_actual['confianza']:.2%}")
-                print(f"    Precio: ${señal_actual['precio']:,.2f}")
-                print(f"    SL: ${señal_actual['stop_loss']:,.2f}")
-                print(f"    TP: ${señal_actual['take_profit']:,.2f}")
-                print(f"    R:R: {señal_actual['ratio_rr']:.2f}")
-              
-                enviar_telegram(
-                    f"📊 SEÑAL {ticker}\n"
-                    f"Dirección: {señal_actual['señal']}\n"
-                    f"Probabilidad: {señal_actual['probabilidad']:.2%}\n"
-                    f"Confianza: {señal_actual['confianza']:.2%}\n"
-                    f"Precio: {señal_actual['precio']:.2f}\n"
-                    f"SL: {señal_actual['stop_loss']:.2f}\n"
-                    f"TP: {señal_actual['take_profit']:.2f}\n"
-                    f"R:R: {señal_actual['ratio_rr']:.2f}"
-                )
+           señal_actual = sistema.analizar_tiempo_real()
+
+           if señal_actual and señal_actual['confianza'] >= TradingConfig.UMBRAL_CONFIANZA_MIN:
+
+               print(f"\n  🚨 SEÑAL DETECTADA:")
+               print(f"    Dirección: {señal_actual['señal']}")
+               print(f"    Probabilidad: {señal_actual['probabilidad']:.2%}")
+               print(f"    Confianza: {señal_actual['confianza']:.2%}")
+               print(f"    Precio: ${señal_actual['precio']:,.2f}")
+               print(f"    SL: ${señal_actual['stop_loss']:,.2f}")
+               print(f"    TP: ${señal_actual['take_profit']:,.2f}")
+               print(f"    R:R: {señal_actual['ratio_rr']:.2f}")
+
+               # 🔁 Control de repetición
+               ultima = cargar_ultima_senal()
+               if ultima and ultima["ticker"] == ticker and ultima["señal"] == señal_actual["señal"]:
+                   print("🔁 Señal repetida. No se envía.")
+               else:
+                   fecha = señal_actual['fecha'].strftime("%Y-%m-%d %H:%M")
+
+                   enviar_telegram(
+                       f"📊 SEÑAL {ticker}\n"
+                       f"🕒 Fecha: {fecha}\n"
+                       f"⏱ TF: {TradingConfig.INTERVALO}\n"
+                       f"📈 Tendencia: {señal_actual['tendencia']}\n"
+                       f"📊 RSI: {señal_actual['rsi']:.1f}\n\n"
+                       f"Dirección: {señal_actual['señal']}\n"
+                       f"Probabilidad: {señal_actual['probabilidad']:.2%}\n"
+                       f"Confianza: {señal_actual['confianza']:.2%}\n\n"
+                       f"🎯 Entrada: {señal_actual['precio']:.2f}\n"
+                       f"🛑 SL: {señal_actual['stop_loss']:.2f}\n"
+                       f"🎯 TP: {señal_actual['take_profit']:.2f}\n"
+                       f"⚖️ R:R: {señal_actual['ratio_rr']:.2f}"
+                   )
+
+                   guardar_ultima_senal({
+                       "ticker": ticker,
+                       "señal": señal_actual["señal"],
+                       "fecha": str(señal_actual["fecha"])
+                   })
 
         # 6. Guardar modelos
         if viable:
