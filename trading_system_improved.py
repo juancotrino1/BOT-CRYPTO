@@ -831,7 +831,7 @@ class SistemaTradingTicker:
             
             return {
                 'ticker': self.ticker,
-                'fecha': df_reciente.index[-1],
+                'fecha': datetime.now(TradingConfig.TIMEZONE),
                 'precio': precio,
                 'señal': señal,
                 'probabilidad': prob_promedio,
