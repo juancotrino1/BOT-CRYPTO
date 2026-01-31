@@ -771,7 +771,7 @@ class SistemaTradingTicker:
         
         return viable, criterios_cumplidos
     
-        def analizar_tiempo_real(self):
+    def analizar_tiempo_real(self):
         if not self.modelos:
             return None
 
