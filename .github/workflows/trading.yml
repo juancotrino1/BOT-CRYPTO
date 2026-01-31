@@ -51,7 +51,7 @@ jobs:
           path: cache_datos/
           key: ${{ runner.os }}-trading-data-${{ hashFiles('**/trading_system_v3_optimized.py') }}-${{ github.run_number }}
           restore-keys: |
-            ${{ runner.os }}-trading-data-${{ hashFiles('**/trading_system_v3_optimized.py') }}-
+            ${{ runner.os }}-trading-data-${{ hashFiles('**/trading_system_improved.py') }}-
             ${{ runner.os }}-trading-data-
       
       # Caché de modelos ML entrenados (persiste mientras no cambie el código)
@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: modelos_trading/
-          key: ${{ runner.os }}-ml-models-${{ hashFiles('**/trading_system_v3_optimized.py') }}
+          key: ${{ runner.os }}-ml-models-${{ hashFiles('**/trading_system_improved.py') }}
           restore-keys: |
             ${{ runner.os }}-ml-models-
       
@@ -95,7 +95,7 @@ jobs:
           
           # Ejecutar sistema
           echo "🚀 Iniciando sistema de trading..."
-          python trading_system_v3_optimized.py $ARGS
+          python trading_system_improved.py $ARGS
       
       # Guardar logs siempre (no solo en fallo)
       - name: Upload execution logs
