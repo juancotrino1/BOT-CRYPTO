@@ -772,111 +772,110 @@ class SistemaTradingTicker:
         return viable, criterios_cumplidos
     
     def analizar_tiempo_real(self):
-        if not self.modelos:
-            return None
-
-        # ❌ SL y TP inválidos o demasiado cercanos
-        if abs(señal_actual['take_profit'] - señal_actual['precio']) < señal_actual['precio'] * 0.001:
-            return
-
-        if abs(señal_actual['stop_loss'] - señal_actual['precio']) < señal_actual['precio'] * 0.001:
-            return
-
+    if not self.modelos:
+        return None
         
-        try:
-            df_reciente = yf.download(
-                self.ticker,
-                start=self.fechas['actual'] - timedelta(days=7),
-                end=self.fechas['actual'],
-                interval=TradingConfig.INTERVALO,
-                progress=False
-            )
+    try:
+        df_reciente = yf.download(
+            self.ticker,
+            start=self.fechas['actual'] - timedelta(days=7),
+            end=self.fechas['actual'],
+            interval=TradingConfig.INTERVALO,
+            progress=False
+        )
 
-            if df_reciente.empty:
-                return None
-
-            if isinstance(df_reciente.columns, pd.MultiIndex):
-                df_reciente.columns = df_reciente.columns.get_level_values(0)
-
-            df_reciente = df_reciente[['Open', 'High', 'Low', 'Close', 'Volume']]
-            df_reciente = IndicadoresTecnicos.calcular_features(df_reciente)
-
-            # === MEAN REVERSION ===
-            df_reciente["ret_log"] = np.log(df_reciente["Close"] / df_reciente["Close"].shift(1))
-            window = 72
-            df_reciente["mu"] = df_reciente["ret_log"].rolling(window).mean()
-            df_reciente["sigma"] = df_reciente["ret_log"].rolling(window).std()
-            df_reciente["sigma"] = df_reciente["sigma"].replace(0, np.nan)
-            df_reciente["z_mr"] = (df_reciente["ret_log"] - df_reciente["mu"]) / df_reciente["sigma"]
-
-            z_actual = df_reciente["z_mr"].iloc[-1]
-            if pd.isna(z_actual) or np.isinf(z_actual):
-                z_actual = 0
-
-            evento = "NO"
-            if z_actual > 2.2:
-                evento = "MR SHORT"
-            elif z_actual < -2.2:
-                evento = "MR LONG"
-
-            # === PREDICCIONES ===
-            predicciones = {}
-            for horizonte, modelo in self.modelos.items():
-                pred = modelo.predecir(df_reciente)
-                if pred:
-                    predicciones[horizonte] = pred
-
-            if not predicciones:
-                return None
-
-            probs_positivas = [p['probabilidad_positiva'] for p in predicciones.values()]
-            prob_promedio = np.mean(probs_positivas)
-            confianza_promedio = np.mean([p['confianza'] for p in predicciones.values()])
-
-            señal = "LONG" if prob_promedio > 0.5 else "SHORT"
-            prob_real = prob_promedio if señal == "LONG" else 1 - prob_promedio
-
-            ultima_vela = df_reciente.iloc[-1]
-            precio = ultima_vela['Close']
-            atr = ultima_vela['ATR']
-
-            if pd.isna(atr) or atr <= 0:
-                return None
-
-            min_dist = precio * 0.002
-            atr = max(atr, min_dist)
-
-            if señal == 'LONG':
-                sl = precio - TradingConfig.MULTIPLICADOR_SL * atr
-                tp = precio + TradingConfig.MULTIPLICADOR_TP * atr
-            else:
-                sl = precio + TradingConfig.MULTIPLICADOR_SL * atr
-                tp = precio - TradingConfig.MULTIPLICADOR_TP * atr
-
-            ratio_rr = abs(tp - precio) / abs(precio - sl)
-            if ratio_rr < TradingConfig.RATIO_MINIMO_RR:
-                return None
-
-            return {
-                'ticker': self.ticker,
-                'fecha': datetime.now(TradingConfig.TIMEZONE),
-                'precio': precio,
-                'señal': señal,
-                'probabilidad': prob_real,
-                'confianza': confianza_promedio,
-                'stop_loss': sl,
-                'take_profit': tp,
-                'ratio_rr': ratio_rr,
-                'predicciones_detalle': predicciones,
-                'rsi': ultima_vela.get('RSI', 50),
-                'tendencia': 'ALCISTA' if ultima_vela.get('tendencia', 0) == 1 else 'BAJISTA',
-                'z_mr': float(z_actual),
-                'evento_mr': evento,
-            }
-
-        except Exception as e:
-            print(f"  ❌ Error análisis tiempo real: {e}")
+        if df_reciente.empty:
             return None
+
+        if isinstance(df_reciente.columns, pd.MultiIndex):
+            df_reciente.columns = df_reciente.columns.get_level_values(0)
+
+        df_reciente = df_reciente[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df_reciente = IndicadoresTecnicos.calcular_features(df_reciente)
+
+        # === MEAN REVERSION ===
+        df_reciente["ret_log"] = np.log(df_reciente["Close"] / df_reciente["Close"].shift(1))
+        window = 72
+        df_reciente["mu"] = df_reciente["ret_log"].rolling(window).mean()
+        df_reciente["sigma"] = df_reciente["ret_log"].rolling(window).std()
+        df_reciente["sigma"] = df_reciente["sigma"].replace(0, np.nan)
+        df_reciente["z_mr"] = (df_reciente["ret_log"] - df_reciente["mu"]) / df_reciente["sigma"]
+
+        z_actual = df_reciente["z_mr"].iloc[-1]
+        if pd.isna(z_actual) or np.isinf(z_actual):
+            z_actual = 0
+
+        evento = "NO"
+        if z_actual > 2.2:
+            evento = "MR SHORT"
+        elif z_actual < -2.2:
+            evento = "MR LONG"
+
+        # === PREDICCIONES ===
+        predicciones = {}
+        for horizonte, modelo in self.modelos.items():
+            pred = modelo.predecir(df_reciente)
+            if pred:
+                predicciones[horizonte] = pred
+
+        if not predicciones:
+            return None
+
+        probs_positivas = [p['probabilidad_positiva'] for p in predicciones.values()]
+        prob_promedio = np.mean(probs_positivas)
+        confianza_promedio = np.mean([p['confianza'] for p in predicciones.values()])
+
+        señal = "LONG" if prob_promedio > 0.5 else "SHORT"
+        prob_real = prob_promedio if señal == "LONG" else 1 - prob_promedio
+
+        ultima_vela = df_reciente.iloc[-1]
+        precio = ultima_vela['Close']
+        atr = ultima_vela['ATR']
+
+        if pd.isna(atr) or atr <= 0:
+            return None
+
+        min_dist = precio * 0.002
+        atr = max(atr, min_dist)
+
+        if señal == 'LONG':
+            sl = precio - TradingConfig.MULTIPLICADOR_SL * atr
+            tp = precio + TradingConfig.MULTIPLICADOR_TP * atr
+        else:
+            sl = precio + TradingConfig.MULTIPLICADOR_SL * atr
+            tp = precio - TradingConfig.MULTIPLICADOR_TP * atr
+
+        # ✅ Validación de SL y TP aquí (no al principio de la función)
+        if abs(tp - precio) < precio * 0.001:
+            return None
+            
+        if abs(sl - precio) < precio * 0.001:
+            return None
+
+        ratio_rr = abs(tp - precio) / abs(precio - sl)
+        if ratio_rr < TradingConfig.RATIO_MINIMO_RR:
+            return None
+
+        return {
+            'ticker': self.ticker,
+            'fecha': datetime.now(TradingConfig.TIMEZONE),
+            'precio': precio,
+            'señal': señal,
+            'probabilidad': prob_real,
+            'confianza': confianza_promedio,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'ratio_rr': ratio_rr,
+            'predicciones_detalle': predicciones,
+            'rsi': ultima_vela.get('RSI', 50),
+            'tendencia': 'ALCISTA' if ultima_vela.get('tendencia', 0) == 1 else 'BAJISTA',
+            'z_mr': float(z_actual),
+            'evento_mr': evento,
+        }
+
+    except Exception as e:
+        print(f"  ❌ Error análisis tiempo real: {e}")
+        return None
 
     
     def guardar_modelos(self):
