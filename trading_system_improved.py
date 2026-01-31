@@ -1,4 +1,4 @@
-import ccxt
+import yfinance as yf
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -6,8 +6,6 @@ import pytz
 import os
 import requests
 import warnings
-import time
-import pickle
 from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
@@ -47,375 +45,6 @@ def enviar_telegram(mensaje):
 warnings.filterwarnings('ignore')
 
 # ============================================
-# PROVEEDOR DE DATOS CCXT
-# ============================================
-
-class CCXTDataProvider:
-    """Proveedor de datos usando CCXT - Con fallback multi-exchange"""
-    
-    def __init__(self, exchange_name='coinbasepro', fallback_exchanges=None):
-        """
-        Inicializa conexión con el exchange con sistema de fallback
-        
-        Args:
-            exchange_name: Exchange principal
-            fallback_exchanges: Lista de exchanges alternativos si el principal falla
-        
-        Exchanges recomendados por región:
-        - coinbasepro: Global (excepto países sancionados)
-        - kraken: Global
-        - bitfinex: Global
-        - bybit: Asia/Europa
-        - okx: Global
-        - binance: Bloqueado en algunos países
-        """
-        
-        # Exchanges de fallback por defecto
-        if fallback_exchanges is None:
-            fallback_exchanges = ['kraken', 'okx', 'bitfinex']
-        
-        self.exchange = None
-        self.exchange_name = None
-        self.tried_exchanges = []
-        
-        # Intentar conectar con exchange principal
-        all_exchanges = [exchange_name] + fallback_exchanges
-        
-        for exchange in all_exchanges:
-            try:
-                print(f"  🔄 Intentando conectar con {exchange}...")
-                
-                temp_exchange = getattr(ccxt, exchange)({
-                    'enableRateLimit': True,
-                    'options': {
-                        'defaultType': 'spot',
-                    },
-                    'timeout': 30000,  # 30 segundos timeout
-                })
-                
-                # Verificar que funciona haciendo un request simple
-                temp_exchange.load_markets()
-                
-                self.exchange = temp_exchange
-                self.exchange_name = exchange
-                print(f"  ✅ Conectado a {temp_exchange.name}")
-                break
-                
-            except ccxt.NetworkError as e:
-                print(f"  ⚠️ {exchange}: Error de red - {str(e)[:100]}")
-                self.tried_exchanges.append(exchange)
-                continue
-                
-            except ccxt.ExchangeError as e:
-                if '451' in str(e) or 'restricted' in str(e).lower():
-                    print(f"  🚫 {exchange}: Bloqueado en tu región")
-                else:
-                    print(f"  ⚠️ {exchange}: {str(e)[:100]}")
-                self.tried_exchanges.append(exchange)
-                continue
-                
-            except Exception as e:
-                print(f"  ⚠️ {exchange}: Error - {str(e)[:100]}")
-                self.tried_exchanges.append(exchange)
-                continue
-        
-        if self.exchange is None:
-            raise Exception(
-                f"❌ No se pudo conectar a ningún exchange.\n"
-                f"Intentados: {', '.join(all_exchanges)}\n"
-                f"Verifica tu conexión a internet."
-            )
-        
-        # Mapeo de símbolos - adaptativo según exchange
-        self._setup_symbol_mapping()
-    
-    def _setup_symbol_mapping(self):
-        """Configura mapeo de símbolos según el exchange"""
-        
-        if self.exchange_name in ['coinbasepro', 'coinbase', 'kraken']:
-            # Estos exchanges usan formato CRYPTO-USD
-            self.symbol_mapping = {
-                'BTC-USD': 'BTC/USD',
-                'ETH-USD': 'ETH/USD',
-                'SOL-USD': 'SOL/USD',
-                'DOGE-USD': 'DOGE/USD',
-                'ADA-USD': 'ADA/USD',
-                'LINK-USD': 'LINK/USD',
-                'AAVE-USD': 'AAVE/USD',
-                'NEAR-USD': 'NEAR/USD',
-            }
-        else:
-            # Binance, OKX, Bybit, etc. usan USDT
-            self.symbol_mapping = {
-                'BTC-USD': 'BTC/USDT',
-                'ETH-USD': 'ETH/USDT',
-                'SOL-USD': 'SOL/USDT',
-                'BNB-USD': 'BNB/USDT',
-                'DOGE-USD': 'DOGE/USDT',
-                'ADA-USD': 'ADA/USDT',
-                'LINK-USD': 'LINK/USDT',
-                'AAVE-USD': 'AAVE/USDT',
-                'NEAR-USD': 'NEAR/USDT',
-            }
-        
-        print(f"  📝 Usando pares con {list(self.symbol_mapping.values())[0].split('/')[1]}")
-        
-        # Mapeo de intervalos
-        self.timeframe_mapping = {
-            '1m': '1m',
-            '5m': '5m',
-            '15m': '15m',
-            '30m': '30m',
-            '1h': '1h',
-            '4h': '4h',
-            '1d': '1d',
-            '1w': '1w'
-        }
-    
-    def descargar_datos(self, ticker, intervalo='4h', dias=1460):
-        """
-        Descarga datos históricos del exchange
-        
-        Args:
-            ticker: Símbolo (ej: 'BTC-USD')
-            intervalo: Timeframe ('1h', '4h', '1d')
-            dias: Días de historia a descargar
-        
-        Returns:
-            DataFrame con OHLCV o None si falla
-        """
-        
-        print(f"\n{'='*80}")
-        print(f"📥 DESCARGANDO {ticker} desde {self.exchange.name.upper()}")
-        print(f"{'='*80}")
-        
-        # Convertir símbolo
-        symbol = self.symbol_mapping.get(ticker)
-        if not symbol:
-            print(f"  ❌ Ticker {ticker} no soportado")
-            print(f"  💡 Tickers disponibles: {list(self.symbol_mapping.keys())}")
-            return None
-        
-        # Convertir intervalo
-        timeframe = self.timeframe_mapping.get(intervalo)
-        if not timeframe:
-            print(f"  ❌ Intervalo {intervalo} no soportado")
-            return None
-        
-        try:
-            # Verificar que el exchange soporta este par
-            self.exchange.load_markets()
-            if symbol not in self.exchange.markets:
-                print(f"  ❌ {symbol} no disponible en {self.exchange.name}")
-                return None
-            
-            # Calcular timestamp de inicio (en milisegundos)
-            since = self.exchange.milliseconds() - (dias * 24 * 60 * 60 * 1000)
-            
-            # CCXT descarga en lotes (máximo 1000-1500 velas por request)
-            all_ohlcv = []
-            current_since = since
-            limit = 1000  # Velas por request
-            
-            print(f"  🔄 Descargando datos históricos...")
-            print(f"  📅 Objetivo: {dias} días ({intervalo})")
-            
-            iteration = 0
-            max_iterations = 100  # Protección contra loops infinitos
-            
-            while iteration < max_iterations:
-                iteration += 1
-                
-                try:
-                    # Descargar lote
-                    ohlcv = self.exchange.fetch_ohlcv(
-                        symbol,
-                        timeframe=timeframe,
-                        since=current_since,
-                        limit=limit
-                    )
-                    
-                    if not ohlcv:
-                        print(f"  ⚠️ No hay más datos disponibles")
-                        break
-                    
-                    # Evitar duplicados
-                    if all_ohlcv and ohlcv[0][0] <= all_ohlcv[-1][0]:
-                        print(f"  ✅ Descarga completa (sin nuevos datos)")
-                        break
-                    
-                    all_ohlcv.extend(ohlcv)
-                    
-                    # Mostrar progreso
-                    fecha_ultima = datetime.fromtimestamp(ohlcv[-1][0] / 1000)
-                    print(f"    📊 Lote {iteration}: hasta {fecha_ultima.strftime('%Y-%m-%d %H:%M')} "
-                          f"({len(all_ohlcv):,} velas acumuladas)")
-                    
-                    # Si llegamos al presente, terminar
-                    if fecha_ultima >= datetime.now() - timedelta(hours=24):
-                        print(f"  ✅ Alcanzado el presente")
-                        break
-                    
-                    # Actualizar timestamp para siguiente lote
-                    current_since = ohlcv[-1][0] + 1
-                    
-                    # Pausa para respetar rate limit
-                    if self.exchange.rateLimit:
-                        time.sleep(self.exchange.rateLimit / 1000)
-                    
-                except ccxt.RateLimitExceeded:
-                    print(f"  ⚠️ Rate limit alcanzado, esperando 60s...")
-                    time.sleep(60)
-                    continue
-                    
-                except Exception as e:
-                    print(f"  ⚠️ Error en lote {iteration}: {e}")
-                    break
-            
-            if not all_ohlcv:
-                print(f"  ❌ No se pudieron descargar datos")
-                return None
-            
-            # Convertir a DataFrame
-            df = pd.DataFrame(
-                all_ohlcv,
-                columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
-            )
-            
-            # Convertir timestamp a datetime
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            
-            # Convertir a timezone configurado
-            df.index = df.index.tz_localize('UTC').tz_convert('America/Bogota')
-            
-            # Limpiar duplicados y ordenar
-            df = df[~df.index.duplicated(keep='last')]
-            df = df.sort_index()
-            
-            # Asegurar tipos numéricos
-            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Eliminar NaN
-            df = df.dropna()
-            
-            print(f"\n  ✅ DESCARGA EXITOSA")
-            print(f"  📊 Total velas: {len(df):,}")
-            print(f"  📅 Rango: {df.index[0].date()} → {df.index[-1].date()}")
-            print(f"  💰 Precio actual: ${df['Close'].iloc[-1]:,.2f}")
-            print(f"  📈 Cambio periodo: {((df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1) * 100:+.2f}%")
-            
-            return df
-            
-        except ccxt.NetworkError as e:
-            print(f"  ❌ Error de red: {e}")
-            return None
-        except ccxt.ExchangeError as e:
-            print(f"  ❌ Error del exchange: {e}")
-            return None
-        except Exception as e:
-            print(f"  ❌ Error inesperado: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def obtener_precio_actual(self, ticker):
-        """Obtiene precio en tiempo real"""
-        symbol = self.symbol_mapping.get(ticker)
-        if not symbol:
-            return None
-        
-        try:
-            ticker_data = self.exchange.fetch_ticker(symbol)
-            return ticker_data['last']
-        except Exception as e:
-            print(f"❌ Error obteniendo precio de {ticker}: {e}")
-            return None
-
-
-# ============================================
-# SISTEMA DE CACHÉ
-# ============================================
-
-class CacheManager:
-    """Gestiona caché de datos descargados para evitar descargas repetidas"""
-    
-    def __init__(self, cache_dir="cache_datos_ccxt"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-    
-    def _get_cache_path(self, ticker, intervalo, exchange='coinbasepro'):
-        """Ruta del archivo de caché"""
-        filename = f"{exchange}_{ticker.replace('/', '-')}_{intervalo}.pkl"
-        return self.cache_dir / filename
-    
-    def cargar(self, ticker, intervalo, exchange='coinbasepro', max_age_hours=24):
-        """
-        Intenta cargar desde caché
-        
-        Args:
-            ticker: Símbolo
-            intervalo: Timeframe
-            exchange: Nombre del exchange
-            max_age_hours: Edad máxima del caché en horas
-        
-        Returns:
-            DataFrame o None
-        """
-        cache_path = self._get_cache_path(ticker, intervalo, exchange)
-        
-        if not cache_path.exists():
-            return None
-        
-        # Verificar antigüedad
-        edad_horas = (datetime.now() - datetime.fromtimestamp(
-            cache_path.stat().st_mtime
-        )).total_seconds() / 3600
-        
-        if edad_horas > max_age_hours:
-            print(f"  ⚠️ Caché expirado ({edad_horas:.1f} horas)")
-            return None
-        
-        try:
-            with open(cache_path, 'rb') as f:
-                df = pickle.load(f)
-            
-            print(f"  💾 Cargado desde caché ({len(df):,} velas, {edad_horas:.1f}h antigüedad)")
-            return df
-        
-        except Exception as e:
-            print(f"  ⚠️ Error leyendo caché: {e}")
-            return None
-    
-    def guardar(self, ticker, intervalo, df, exchange='coinbasepro'):
-        """Guarda DataFrame en caché"""
-        cache_path = self._get_cache_path(ticker, intervalo, exchange)
-        
-        try:
-            with open(cache_path, 'wb') as f:
-                pickle.dump(df, f)
-            
-            print(f"  💾 Guardado en caché: {cache_path.name}")
-        
-        except Exception as e:
-            print(f"  ⚠️ Error guardando caché: {e}")
-    
-    def limpiar_cache_antiguo(self, dias=7):
-        """Elimina archivos de caché más antiguos que X días"""
-        limite = datetime.now() - timedelta(days=dias)
-        
-        eliminados = 0
-        for archivo in self.cache_dir.glob("*.pkl"):
-            if datetime.fromtimestamp(archivo.stat().st_mtime) < limite:
-                archivo.unlink()
-                eliminados += 1
-        
-        if eliminados > 0:
-            print(f"🗑️ Limpiados {eliminados} archivos de caché antiguos")
-
-
-# ============================================
 # CONFIGURACIÓN MEJORADA
 # ============================================
 
@@ -425,38 +54,26 @@ class TradingConfig:
     # Timezone
     TIMEZONE = pytz.timezone('America/Bogota')
     
-    # === FUENTE DE DATOS ===
-    DATA_SOURCE = 'ccxt'           # Usar CCXT
-    EXCHANGE = 'coinbasepro'       # Exchange principal (con fallback automático)
-    USE_CACHE = True               # Usar sistema de caché
-    CACHE_MAX_AGE_HOURS = 12       # Caché válido por 12 horas
+    # Períodos de tiempo (CORREGIDO)
+    INTERVALO = "1h"
+    DIAS_ENTRENAMIENTO = 365  # 1 año de datos históricos
+    DIAS_VALIDACION = 90      # 3 meses para validación
+    DIAS_BACKTEST = 30        # 1 mes para backtesting final
     
-    # Períodos de tiempo - OPTIMIZADO PARA CCXT
-    INTERVALO = "4h"               # 4 horas (buen balance)
-    DIAS_ENTRENAMIENTO = 1460      # 4 años (CCXT permite mucho más!)
-    DIAS_VALIDACION = 180          # 6 meses
-    DIAS_BACKTEST = 90             # 3 meses
-    
-    # Activos - Los más líquidos (disponibles en casi todos los exchanges)
+    # Activos
     ACTIVOS = [
-        "BTC-USD",   # Disponible en TODOS los exchanges
-        "ETH-USD",   # Disponible en TODOS los exchanges
-        "SOL-USD",   # Muy común
-        "LINK-USD",  # Muy común
-        "AAVE-USD",  # Común en exchanges principales
-        "ADA-USD",   # Muy común
-        "DOGE-USD",  # Común
+        "BTC-USD","ETH-USD","SOL-USD","BNB-USD","DOGE-USD","ADA-USD","LINK-USD","SUI20947-USD","AAVE-USD","NEAR-USD"
     ]
     
-    # Parámetros técnicos (ajustados para 4h)
-    VENTANA_VOLATILIDAD = 6        # 6 velas de 4h = 24 horas
-    VENTANA_TENDENCIA = 50         # ~8 días
-    VENTANA_RAPIDA = 12            # ~2 días
+    # Parámetros técnicos
+    VENTANA_VOLATILIDAD = 24  # 24 horas
+    VENTANA_TENDENCIA = 50
+    VENTANA_RAPIDA = 12
     ATR_PERIODO = 14
     RSI_PERIODO = 14
     
-    # Horizontes de predicción (en velas de 4h)
-    HORIZONTES = [1, 2, 3, 6, 12]  # = 4h, 8h, 12h, 24h, 48h
+    # Horizontes de predicción (CORREGIDO - más cortos)
+    HORIZONTES = [4, 8, 12, 24, 48]  # En horas
     
     # Gestión de riesgo
     MULTIPLICADOR_SL = 2.0
@@ -466,8 +83,8 @@ class TradingConfig:
     
     # Validación
     N_FOLDS_WF = 3
-    MIN_MUESTRAS_ENTRENAMIENTO = 1000   # Más estricto con más datos
-    MIN_MUESTRAS_CLASE = 50             # Más balance requerido
+    MIN_MUESTRAS_ENTRENAMIENTO = 500
+    MIN_MUESTRAS_CLASE = 20
     
     # Umbrales de trading
     UMBRAL_PROBABILIDAD_MIN = 0.65
@@ -475,7 +92,6 @@ class TradingConfig:
     
     # Persistencia
     MODELOS_DIR = Path("modelos_trading")
-    CACHE_DIR = Path("cache_datos_ccxt")
     
     @classmethod
     def get_fechas(cls):
@@ -487,36 +103,10 @@ class TradingConfig:
             'inicio_validacion': now - timedelta(days=cls.DIAS_VALIDACION + cls.DIAS_BACKTEST),
             'inicio_backtest': now - timedelta(days=cls.DIAS_BACKTEST)
         }
-    
-    @classmethod
-    def validar_configuracion(cls):
-        """Valida que la configuración sea coherente"""
-        fechas = cls.get_fechas()
-        dias_totales = (fechas['actual'] - fechas['inicio_entrenamiento']).days
-        
-        # Calcular velas esperadas
-        velas_por_dia = {'1h': 24, '4h': 6, '1d': 1, '12h': 2}
-        velas_esperadas = dias_totales * velas_por_dia.get(cls.INTERVALO, 24)
-        
-        print(f"\n📊 VALIDACIÓN DE CONFIGURACIÓN")
-        print(f"{'='*70}")
-        print(f"Fuente de datos: {cls.DATA_SOURCE.upper()} ({cls.EXCHANGE})")
-        print(f"Intervalo: {cls.INTERVALO}")
-        print(f"Días totales: {dias_totales} (~{dias_totales/365:.1f} años)")
-        print(f"Velas esperadas: {velas_esperadas:,}")
-        print(f"Mínimo requerido: {cls.MIN_MUESTRAS_ENTRENAMIENTO:,}")
-        print(f"Horizontes: {cls.HORIZONTES} velas = {[h*4 for h in cls.HORIZONTES]} horas")
-        
-        if velas_esperadas < cls.MIN_MUESTRAS_ENTRENAMIENTO:
-            print(f"⚠️ ADVERTENCIA: Pocas velas para entrenamiento")
-        else:
-            print(f"✅ Configuración válida")
-        
-        print(f"{'='*70}\n")
 
 
 # ============================================
-# CÁLCULO DE INDICADORES (SIN CAMBIOS)
+# CÁLCULO DE INDICADORES (MEJORADO)
 # ============================================
 
 class IndicadoresTecnicos:
@@ -635,7 +225,7 @@ class IndicadoresTecnicos:
 
 
 # ============================================
-# ETIQUETADO DE DATOS (SIN CAMBIOS)
+# ETIQUETADO DE DATOS (CORREGIDO)
 # ============================================
 
 class EtiquetadoDatos:
@@ -691,7 +281,7 @@ class EtiquetadoDatos:
 
 
 # ============================================
-# MODELO DE MACHINE LEARNING (SIN CAMBIOS)
+# MODELO DE MACHINE LEARNING (MEJORADO)
 # ============================================
 
 class ModeloPrediccion:
@@ -842,7 +432,7 @@ class ModeloPrediccion:
 
 
 # ============================================
-# BACKTESTING (SIN CAMBIOS)
+# BACKTESTING (MEJORADO)
 # ============================================
 
 class Backtester:
@@ -1036,61 +626,48 @@ class Backtester:
 class SistemaTradingTicker:
     """Sistema completo de trading para un ticker"""
     
-    def __init__(self, ticker, data_provider=None, cache_manager=None):
+    def __init__(self, ticker):
         self.ticker = ticker
         self.modelos = {}
         self.fechas = TradingConfig.get_fechas()
         self.df_historico = None
         self.metricas_backtest = None
-        
-        # Proveedor de datos y caché
-        self.data_provider = data_provider or CCXTDataProvider(TradingConfig.EXCHANGE)
-        self.cache = cache_manager or CacheManager(TradingConfig.CACHE_DIR)
     
     def descargar_datos(self):
-        """Descarga datos históricos usando CCXT con caché"""
+        """Descarga datos históricos"""
+        print(f"\n{'='*80}")
+        print(f"📥 DESCARGANDO {self.ticker}")
+        print(f"{'='*80}")
         
-        # Calcular días totales necesarios
-        dias_totales = (
-            TradingConfig.DIAS_ENTRENAMIENTO +
-            TradingConfig.DIAS_VALIDACION +
-            TradingConfig.DIAS_BACKTEST
-        )
-        
-        # Intentar caché primero si está habilitado
-        if TradingConfig.USE_CACHE:
-            df = self.cache.cargar(
+        try:
+            df = yf.download(
                 self.ticker,
-                TradingConfig.INTERVALO,
-                TradingConfig.EXCHANGE,
-                TradingConfig.CACHE_MAX_AGE_HOURS
+                start=self.fechas['inicio_entrenamiento'],
+                end=self.fechas['actual'],
+                interval=TradingConfig.INTERVALO,
+                progress=False
             )
             
-            if df is not None and len(df) >= TradingConfig.MIN_MUESTRAS_ENTRENAMIENTO:
-                self.df_historico = df
-                return True
-        
-        # Descargar desde exchange
-        df = self.data_provider.descargar_datos(
-            ticker=self.ticker,
-            intervalo=TradingConfig.INTERVALO,
-            dias=dias_totales
-        )
-        
-        if df is None or df.empty:
+            if df.empty:
+                print(f"  ❌ No hay datos disponibles")
+                return False
+            
+            # Limpiar MultiIndex
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+            df = df.dropna()
+            
+            self.df_historico = df
+            print(f"  ✅ Descargado: {len(df)} velas")
+            print(f"  📅 Rango: {df.index[0]} a {df.index[-1]}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
             return False
-        
-        # Guardar en caché
-        if TradingConfig.USE_CACHE:
-            self.cache.guardar(
-                self.ticker,
-                TradingConfig.INTERVALO,
-                df,
-                TradingConfig.EXCHANGE
-            )
-        
-        self.df_historico = df
-        return True
     
     def entrenar_modelos(self):
         """Entrena modelos para todos los horizontes"""
@@ -1195,22 +772,25 @@ class SistemaTradingTicker:
         return viable, criterios_cumplidos
     
     def analizar_tiempo_real(self):
-        """Análisis en tiempo real usando CCXT"""
         if not self.modelos:
             return None
 
         try:
-            # Descargar datos recientes usando CCXT
-            df_reciente = self.data_provider.descargar_datos(
-                ticker=self.ticker,
-                intervalo=TradingConfig.INTERVALO,
-                dias=7
+            df_reciente = yf.download(
+                self.ticker,
+                start=self.fechas['actual'] - timedelta(days=7),
+                end=self.fechas['actual'],
+                interval=TradingConfig.INTERVALO,
+                progress=False
             )
 
-            if df_reciente is None or df_reciente.empty:
+            if df_reciente.empty:
                 return None
 
-            # Calcular features
+            if isinstance(df_reciente.columns, pd.MultiIndex):
+                df_reciente.columns = df_reciente.columns.get_level_values(0)
+
+            df_reciente = df_reciente[['Open', 'High', 'Low', 'Close', 'Volume']]
             df_reciente = IndicadoresTecnicos.calcular_features(df_reciente)
 
             # === MEAN REVERSION ===
@@ -1288,8 +868,6 @@ class SistemaTradingTicker:
     
         except Exception as e:
             print(f"  ❌ Error análisis tiempo real: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
     def guardar_modelos(self):
@@ -1297,7 +875,7 @@ class SistemaTradingTicker:
         if not self.modelos:
             return False
         
-        path_ticker = TradingConfig.MODELOS_DIR / self.ticker.replace('/', '-')
+        path_ticker = TradingConfig.MODELOS_DIR / self.ticker
         path_ticker.mkdir(parents=True, exist_ok=True)
         
         for horizonte, modelo in self.modelos.items():
@@ -1314,32 +892,8 @@ class SistemaTradingTicker:
 
 def main():
 
-    print("🚀 SISTEMA DE TRADING MEJORADO - CCXT")
+    print("🚀 SISTEMA DE TRADING MEJORADO")
     print("=" * 80)
-    
-    # Validar configuración
-    TradingConfig.validar_configuracion()
-    
-    # Inicializar proveedores globales con fallback automático
-    print("\n🌐 CONECTANDO A EXCHANGE...")
-    try:
-        data_provider = CCXTDataProvider(
-            exchange_name=TradingConfig.EXCHANGE,
-            fallback_exchanges=['kraken', 'okx', 'bitfinex', 'bybit']
-        )
-    except Exception as e:
-        print(f"\n❌ ERROR CRÍTICO: No se pudo conectar a ningún exchange")
-        print(f"   {e}")
-        print(f"\n💡 SOLUCIONES:")
-        print(f"   1. Verifica tu conexión a internet")
-        print(f"   2. Intenta con VPN si estás en región restringida")
-        print(f"   3. Espera unos minutos y reintenta")
-        return {}
-    
-    cache_manager = CacheManager(TradingConfig.CACHE_DIR)
-    
-    # Limpiar caché antiguo
-    cache_manager.limpiar_cache_antiguo(dias=7)
     
     fechas = TradingConfig.get_fechas()
     print(f"\n📅 Configuración temporal:")
@@ -1347,13 +901,13 @@ def main():
     print(f"  Entrenamiento desde: {fechas['inicio_entrenamiento'].date()}")
     print(f"  Backtest desde: {fechas['inicio_backtest'].date()}")
     print(f"  Intervalo: {TradingConfig.INTERVALO}")
-    print(f"  Horizontes: {TradingConfig.HORIZONTES} velas")
+    print(f"  Horizontes: {TradingConfig.HORIZONTES} horas")
     
     resultados_globales = {}
     
     # Procesar cada ticker
     for ticker in TradingConfig.ACTIVOS:
-        sistema = SistemaTradingTicker(ticker, data_provider, cache_manager)
+        sistema = SistemaTradingTicker(ticker)
         
         # 1. Descargar datos
         if not sistema.descargar_datos():
