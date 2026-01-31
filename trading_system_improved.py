@@ -799,20 +799,20 @@ class SistemaTradingTicker:
             df_reciente = IndicadoresTecnicos.calcular_features(df_reciente)
 
             # === MEAN REVERSION FILTER ===
-           df_reciente["ret_log"] = np.log(df_reciente["Close"] / df_reciente["Close"].shift(1))
+            df_reciente["ret_log"] = np.log(df_reciente["Close"] / df_reciente["Close"].shift(1))
 
-           window = 72
-           df_reciente["mu"] = df_reciente["ret_log"].rolling(window).mean()
-           df_reciente["sigma"] = df_reciente["ret_log"].rolling(window).std()
-           df_reciente["z_mr"] = (df_reciente["ret_log"] - df_reciente["mu"]) / df_reciente["sigma"]
+            window = 72
+            df_reciente["mu"] = df_reciente["ret_log"].rolling(window).mean()
+            df_reciente["sigma"] = df_reciente["ret_log"].rolling(window).std()
+            df_reciente["z_mr"] = (df_reciente["ret_log"] - df_reciente["mu"]) / df_reciente["sigma"]
 
-           z_actual = df_reciente["z_mr"].iloc[-1]
+            z_actual = df_reciente["z_mr"].iloc[-1]
 
-           evento = "NO"
-           if z_actual > 2.2:
-               evento = "MR SHORT"
-           elif z_actual < -2.2:
-               evento = "MR LONG"
+            evento = "NO"
+            if z_actual > 2.2:
+                evento = "MR SHORT"
+            elif z_actual < -2.2:
+                evento = "MR LONG"
 
             # Obtener predicciones
             predicciones = {}
