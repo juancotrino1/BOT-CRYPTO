@@ -159,7 +159,6 @@ class CCXTDataProvider:
             }
         
         print(f"  📝 Usando pares con {list(self.symbol_mapping.values())[0].split('/')[1]}")
-
         
         # Mapeo de intervalos
         self.timeframe_mapping = {
@@ -173,7 +172,7 @@ class CCXTDataProvider:
             '1w': '1w'
         }
     
-    def descargar_datos(self, ticker, intervalo='4h', dias=1095):
+    def descargar_datos(self, ticker, intervalo='4h', dias=1460):
         """
         Descarga datos históricos del exchange
         
@@ -346,12 +345,12 @@ class CacheManager:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
     
-    def _get_cache_path(self, ticker, intervalo, exchange='binance'):
+    def _get_cache_path(self, ticker, intervalo, exchange='coinbasepro'):
         """Ruta del archivo de caché"""
         filename = f"{exchange}_{ticker.replace('/', '-')}_{intervalo}.pkl"
         return self.cache_dir / filename
     
-    def cargar(self, ticker, intervalo, exchange='binance', max_age_hours=24):
+    def cargar(self, ticker, intervalo, exchange='coinbasepro', max_age_hours=24):
         """
         Intenta cargar desde caché
         
@@ -389,7 +388,7 @@ class CacheManager:
             print(f"  ⚠️ Error leyendo caché: {e}")
             return None
     
-    def guardar(self, ticker, intervalo, df, exchange='binance'):
+    def guardar(self, ticker, intervalo, df, exchange='coinbasepro'):
         """Guarda DataFrame en caché"""
         cache_path = self._get_cache_path(ticker, intervalo, exchange)
         
@@ -429,8 +428,6 @@ class TradingConfig:
     # === FUENTE DE DATOS ===
     DATA_SOURCE = 'ccxt'           # Usar CCXT
     EXCHANGE = 'coinbasepro'       # Exchange principal (con fallback automático)
-    # Otros exchanges: 'kraken', 'okx', 'bitfinex', 'bybit'
-    # El sistema intentará automáticamente con otros si este falla
     USE_CACHE = True               # Usar sistema de caché
     CACHE_MAX_AGE_HOURS = 12       # Caché válido por 12 horas
     
@@ -450,8 +447,6 @@ class TradingConfig:
         "ADA-USD",   # Muy común
         "DOGE-USD",  # Común
     ]
-    # NOTA: BNB-USD puede no estar en exchanges que no sean Binance
-    # NEAR-USD puede no estar en todos los exchanges
     
     # Parámetros técnicos (ajustados para 4h)
     VENTANA_VOLATILIDAD = 6        # 6 velas de 4h = 24 horas
@@ -1035,7 +1030,7 @@ class Backtester:
 
 
 # ============================================
-# SISTEMA COMPLETO POR TICKER (MODIFICADO PARA CCXT)
+# SISTEMA COMPLETO POR TICKER
 # ============================================
 
 class SistemaTradingTicker:
@@ -1048,7 +1043,7 @@ class SistemaTradingTicker:
         self.df_historico = None
         self.metricas_backtest = None
         
-        # NUEVO: Proveedor de datos y caché
+        # Proveedor de datos y caché
         self.data_provider = data_provider or CCXTDataProvider(TradingConfig.EXCHANGE)
         self.cache = cache_manager or CacheManager(TradingConfig.CACHE_DIR)
     
