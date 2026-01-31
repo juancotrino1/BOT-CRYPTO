@@ -51,37 +51,115 @@ warnings.filterwarnings('ignore')
 # ============================================
 
 class CCXTDataProvider:
-    """Proveedor de datos usando CCXT - Descarga desde exchanges reales"""
+    """Proveedor de datos usando CCXT - Con fallback multi-exchange"""
     
-    def __init__(self, exchange_name='binance'):
+    def __init__(self, exchange_name='coinbasepro', fallback_exchanges=None):
         """
-        Inicializa conexión con el exchange
+        Inicializa conexión con el exchange con sistema de fallback
         
-        Exchanges recomendados:
-        - binance (más líquido, recomendado)
-        - coinbase
-        - kraken
-        - bybit
+        Args:
+            exchange_name: Exchange principal
+            fallback_exchanges: Lista de exchanges alternativos si el principal falla
+        
+        Exchanges recomendados por región:
+        - coinbasepro: Global (excepto países sancionados)
+        - kraken: Global
+        - bitfinex: Global
+        - bybit: Asia/Europa
+        - okx: Global
+        - binance: Bloqueado en algunos países
         """
-        try:
-            self.exchange = getattr(ccxt, exchange_name)({
-                'enableRateLimit': True,  # Respetar límites de API
-                'options': {
-                    'defaultType': 'spot',  # Trading spot (no futuros)
-                }
-            })
-            self.exchange_name = exchange_name
-            
-            print(f"✅ Conectado a {self.exchange.name}")
-            
-        except Exception as e:
-            print(f"❌ Error conectando a {exchange_name}: {e}")
-            raise
         
-        # Mapeo de símbolos Yahoo Finance -> Exchange
-        self.symbol_mapping = {
-            'BTC-USD': 'BTC/USDT',
-        }
+        # Exchanges de fallback por defecto
+        if fallback_exchanges is None:
+            fallback_exchanges = ['kraken', 'okx', 'bitfinex']
+        
+        self.exchange = None
+        self.exchange_name = None
+        self.tried_exchanges = []
+        
+        # Intentar conectar con exchange principal
+        all_exchanges = [exchange_name] + fallback_exchanges
+        
+        for exchange in all_exchanges:
+            try:
+                print(f"  🔄 Intentando conectar con {exchange}...")
+                
+                temp_exchange = getattr(ccxt, exchange)({
+                    'enableRateLimit': True,
+                    'options': {
+                        'defaultType': 'spot',
+                    },
+                    'timeout': 30000,  # 30 segundos timeout
+                })
+                
+                # Verificar que funciona haciendo un request simple
+                temp_exchange.load_markets()
+                
+                self.exchange = temp_exchange
+                self.exchange_name = exchange
+                print(f"  ✅ Conectado a {temp_exchange.name}")
+                break
+                
+            except ccxt.NetworkError as e:
+                print(f"  ⚠️ {exchange}: Error de red - {str(e)[:100]}")
+                self.tried_exchanges.append(exchange)
+                continue
+                
+            except ccxt.ExchangeError as e:
+                if '451' in str(e) or 'restricted' in str(e).lower():
+                    print(f"  🚫 {exchange}: Bloqueado en tu región")
+                else:
+                    print(f"  ⚠️ {exchange}: {str(e)[:100]}")
+                self.tried_exchanges.append(exchange)
+                continue
+                
+            except Exception as e:
+                print(f"  ⚠️ {exchange}: Error - {str(e)[:100]}")
+                self.tried_exchanges.append(exchange)
+                continue
+        
+        if self.exchange is None:
+            raise Exception(
+                f"❌ No se pudo conectar a ningún exchange.\n"
+                f"Intentados: {', '.join(all_exchanges)}\n"
+                f"Verifica tu conexión a internet."
+            )
+        
+        # Mapeo de símbolos - adaptativo según exchange
+        self._setup_symbol_mapping()
+    
+    def _setup_symbol_mapping(self):
+        """Configura mapeo de símbolos según el exchange"""
+        
+        if self.exchange_name in ['coinbasepro', 'coinbase', 'kraken']:
+            # Estos exchanges usan formato CRYPTO-USD
+            self.symbol_mapping = {
+                'BTC-USD': 'BTC/USD',
+                'ETH-USD': 'ETH/USD',
+                'SOL-USD': 'SOL/USD',
+                'DOGE-USD': 'DOGE/USD',
+                'ADA-USD': 'ADA/USD',
+                'LINK-USD': 'LINK/USD',
+                'AAVE-USD': 'AAVE/USD',
+                'NEAR-USD': 'NEAR/USD',
+            }
+        else:
+            # Binance, OKX, Bybit, etc. usan USDT
+            self.symbol_mapping = {
+                'BTC-USD': 'BTC/USDT',
+                'ETH-USD': 'ETH/USDT',
+                'SOL-USD': 'SOL/USDT',
+                'BNB-USD': 'BNB/USDT',
+                'DOGE-USD': 'DOGE/USDT',
+                'ADA-USD': 'ADA/USDT',
+                'LINK-USD': 'LINK/USDT',
+                'AAVE-USD': 'AAVE/USDT',
+                'NEAR-USD': 'NEAR/USDT',
+            }
+        
+        print(f"  📝 Usando pares con {list(self.symbol_mapping.values())[0].split('/')[1]}")
+
         
         # Mapeo de intervalos
         self.timeframe_mapping = {
@@ -348,9 +426,11 @@ class TradingConfig:
     # Timezone
     TIMEZONE = pytz.timezone('America/Bogota')
     
-    # === FUENTE DE DATOS (NUEVO) ===
+    # === FUENTE DE DATOS ===
     DATA_SOURCE = 'ccxt'           # Usar CCXT
-    EXCHANGE = 'binance'           # Exchange a usar
+    EXCHANGE = 'coinbasepro'       # Exchange principal (con fallback automático)
+    # Otros exchanges: 'kraken', 'okx', 'bitfinex', 'bybit'
+    # El sistema intentará automáticamente con otros si este falla
     USE_CACHE = True               # Usar sistema de caché
     CACHE_MAX_AGE_HOURS = 12       # Caché válido por 12 horas
     
@@ -360,10 +440,18 @@ class TradingConfig:
     DIAS_VALIDACION = 180          # 6 meses
     DIAS_BACKTEST = 90             # 3 meses
     
-    # Activos
+    # Activos - Los más líquidos (disponibles en casi todos los exchanges)
     ACTIVOS = [
-        "BTC-USD","ETH-USD","SOL-USD","BNB-USD","DOGE-USD","ADA-USD","LINK-USD","AAVE-USD","NEAR-USD"
+        "BTC-USD",   # Disponible en TODOS los exchanges
+        "ETH-USD",   # Disponible en TODOS los exchanges
+        "SOL-USD",   # Muy común
+        "LINK-USD",  # Muy común
+        "AAVE-USD",  # Común en exchanges principales
+        "ADA-USD",   # Muy común
+        "DOGE-USD",  # Común
     ]
+    # NOTA: BNB-USD puede no estar en exchanges que no sean Binance
+    # NEAR-USD puede no estar en todos los exchanges
     
     # Parámetros técnicos (ajustados para 4h)
     VENTANA_VOLATILIDAD = 6        # 6 velas de 4h = 24 horas
@@ -1237,8 +1325,22 @@ def main():
     # Validar configuración
     TradingConfig.validar_configuracion()
     
-    # Inicializar proveedores globales
-    data_provider = CCXTDataProvider(TradingConfig.EXCHANGE)
+    # Inicializar proveedores globales con fallback automático
+    print("\n🌐 CONECTANDO A EXCHANGE...")
+    try:
+        data_provider = CCXTDataProvider(
+            exchange_name=TradingConfig.EXCHANGE,
+            fallback_exchanges=['kraken', 'okx', 'bitfinex', 'bybit']
+        )
+    except Exception as e:
+        print(f"\n❌ ERROR CRÍTICO: No se pudo conectar a ningún exchange")
+        print(f"   {e}")
+        print(f"\n💡 SOLUCIONES:")
+        print(f"   1. Verifica tu conexión a internet")
+        print(f"   2. Intenta con VPN si estás en región restringida")
+        print(f"   3. Espera unos minutos y reintenta")
+        return {}
+    
     cache_manager = CacheManager(TradingConfig.CACHE_DIR)
     
     # Limpiar caché antiguo
