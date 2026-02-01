@@ -615,7 +615,7 @@ class Backtester:
         """Calcula  máximo"""
         equity_curve = (1 + retornos).cumprod()
         running_max = equity_curve.expanding().max()
-         = (equity_curve - running_max) / running_max
+        drawdown = (equity_curve - running_max) / running_max
         return .min()
 
 
