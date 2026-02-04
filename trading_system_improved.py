@@ -27,7 +27,7 @@ class TradingConfig:
     
     # Datos
     INTERVALO = "1h"
-    DIAS_ENTRENAMIENTO = 180
+    DIAS_ENTRENAMIENTO = 365
     DIAS_VALIDACION = 60
     DIAS_BACKTEST = 30
     
