@@ -61,14 +61,16 @@ class TradingConfig:
     MIN_MUESTRAS_ENTRENAMIENTO = 300
     MIN_MUESTRAS_CLASE = 20
     
-    # Umbrales realistas
-    UMBRAL_PROBABILIDAD_MIN = 0.52
-    UMBRAL_CONFIANZA_MIN = 0.51
-    UMBRAL_MOVIMIENTO = 0.008  # 0.8%
+    # ============================================
+    # 🔥 FILTRO DE SEÑALES FUERTES
+    # ============================================
+    UMBRAL_PROBABILIDAD_MIN = 0.60  # ← CAMBIADO: Solo señales con > 60% probabilidad
+    UMBRAL_CONFIANZA_MIN = 0.55     # ← AUMENTADO: Mayor confianza requerida
+    UMBRAL_MOVIMIENTO = 0.008       # 0.8%
     
     # Filtros RSI
-    RSI_EXTREME_LOW = 10
-    RSI_EXTREME_HIGH = 90
+    RSI_EXTREME_LOW = 20
+    RSI_EXTREME_HIGH = 80
     
     MODELOS_DIR = Path("modelos_trading")
     
@@ -926,7 +928,7 @@ class SistemaTradingTicker:
         return viable, criterios_cumplidos
     
     def analizar_tiempo_real(self):
-        """Analiza condiciones actuales"""
+        """Analiza condiciones actuales - SOLO SEÑALES FUERTES"""
         if not self.modelos:
             return None
         
@@ -962,6 +964,9 @@ class SistemaTradingTicker:
             prob_promedio = np.mean(probs_positivas)
             confianza_promedio = np.mean([p['confianza'] for p in predicciones.values()])
             
+            # ============================================
+            # 🔥 FILTRO PRINCIPAL: SOLO SEÑALES FUERTES
+            # ============================================
             if confianza_promedio < TradingConfig.UMBRAL_CONFIANZA_MIN:
                 return None
             
@@ -972,6 +977,7 @@ class SistemaTradingTicker:
                 señal = "SHORT"
                 prob_real = 1 - prob_promedio
             
+            # 🔥 BLOQUEO: Solo señales FUERTES (> 60%)
             if prob_real < TradingConfig.UMBRAL_PROBABILIDAD_MIN:
                 return None
             
@@ -980,7 +986,7 @@ class SistemaTradingTicker:
             precio = ultima_vela['Close']
             rsi = ultima_vela.get('RSI_14', 50)
             
-            # Filtros
+            # Filtros RSI
             if señal == "LONG" and rsi > TradingConfig.RSI_EXTREME_HIGH:
                 return None
             
@@ -1000,12 +1006,14 @@ class SistemaTradingTicker:
             if ratio_rr < TradingConfig.RATIO_MINIMO_RR:
                 return None
             
-            # Fuerza de señal
-            fuerza = "DÉBIL"
-            if prob_real > 0.6:
-                fuerza = "FUERTE"
-            elif prob_real > 0.55:
-                fuerza = "MEDIA"
+            # ============================================
+            # 🔥 TODAS LAS SEÑALES AQUÍ SON FUERTES
+            # ============================================
+            fuerza = "FUERTE"  # Solo llega aquí si prob > 60%
+            
+            # Clasificación adicional
+            if prob_real > 0.70:
+                fuerza = "MUY FUERTE"
             
             estado_rsi = "NEUTRO"
             if rsi < 30:
@@ -1099,21 +1107,17 @@ def enviar_telegram(mensaje):
 # ============================================
 
 def main():
-    """Sistema principal corregido para límites de Yahoo"""
-    print("🚀 SISTEMA DE TRADING - VERSIÓN CORREGIDA")
+    """Sistema principal - SOLO SEÑALES FUERTES"""
+    print("🚀 SISTEMA DE TRADING - SOLO SEÑALES FUERTES")
     print("=" * 80)
-    print("✅ Respeta límites de Yahoo Finance (730 días para 1h)")
-    print("✅ Descarga inteligente por partes")
-    print("✅ Configuración realista")
+    print("🔥 CONFIGURADO PARA MOSTRAR ÚNICAMENTE SEÑALES CON > 60% PROBABILIDAD")
     print("=" * 80)
     
     fechas = TradingConfig.get_fechas()
     print(f"\n📅 Configuración:")
     print(f"  Fecha actual: {fechas['actual'].strftime('%Y-%m-%d %H:%M')}")
-    print(f"  Inicio entrenamiento: {fechas['inicio_entrenamiento'].strftime('%Y-%m-%d')}")
-    print(f"  Inicio backtest: {fechas['inicio_backtest'].strftime('%Y-%m-%d')}")
-    print(f"  Límite Yahoo: {fechas['fecha_max_retroceso'].strftime('%Y-%m-%d')}")
-    print(f"  Días totales: {(fechas['actual'] - fechas['inicio_entrenamiento']).days}")
+    print(f"  Umbral mínimo: {TradingConfig.UMBRAL_PROBABILIDAD_MIN:.1%} (SOLO FUERTES)")
+    print(f"  Confianza mínima: {TradingConfig.UMBRAL_CONFIANZA_MIN:.1%}")
     
     # Crear directorio para modelos
     TradingConfig.MODELOS_DIR.mkdir(exist_ok=True)
@@ -1156,7 +1160,7 @@ def main():
             señal_actual = sistema.analizar_tiempo_real()
             
             if señal_actual:
-                print(f"\n  🚨 SEÑAL DETECTADA: {señal_actual['señal']} ({señal_actual['fuerza']})")
+                print(f"\n  🔥 SEÑAL FUERTE DETECTADA: {señal_actual['señal']} ({señal_actual['fuerza']})")
                 print(f"    Probabilidad: {señal_actual['probabilidad']:.2%}")
                 print(f"    Precio: ${señal_actual['precio']:,.2f}")
                 print(f"    RSI: {señal_actual['rsi']:.0f} ({señal_actual['estado_rsi']})")
@@ -1181,6 +1185,7 @@ def main():
                     # Enviar Telegram
                     emoji = "📈" if señal_actual['señal'] == "LONG" else "📉"
                     mensaje = (
+                        f"🔥 SEÑAL FUERTE 🔥\n"
                         f"{emoji} {ticker} - {señal_actual['señal']} ({señal_actual['fuerza']})\n"
                         f"📊 Probabilidad: {señal_actual['probabilidad']:.1%}\n"
                         f"💰 Precio: ${señal_actual['precio']:,.2f}\n"
@@ -1202,7 +1207,7 @@ def main():
                         "probabilidad": señal_actual["probabilidad"]
                     })
             else:
-                print("  ℹ️ No hay señal en este momento")
+                print("  ℹ️ No hay señal FUERTE en este momento")
         
         # 6. Guardar modelos si es viable
         if viable:
@@ -1218,7 +1223,7 @@ def main():
     
     # Resumen final
     print(f"\n{'='*80}")
-    print("📊 RESUMEN FINAL")
+    print("📊 RESUMEN FINAL - SOLO SEÑALES FUERTES")
     print(f"{'='*80}")
     
     viables = [t for t, r in resultados_globales.items() if r['viable']]
@@ -1226,7 +1231,7 @@ def main():
     
     print(f"\n  Activos procesados: {len(resultados_globales)}")
     print(f"  Sistemas viables: {len(viables)}")
-    print(f"  Señales activas: {len(con_senal)}")
+    print(f"  🔥 Señales FUERTES activas: {len(con_senal)}")
     
     if viables:
         print(f"\n  ✅ SISTEMAS VIABLES:")
@@ -1240,14 +1245,14 @@ def main():
             print(f"      Profit Factor: {m['profit_factor']:.2f}")
     
     if con_senal:
-        print(f"\n  🚨 SEÑALES ACTIVAS:")
+        print(f"\n  🔥 SEÑALES FUERTES ACTIVAS:")
         for ticker in con_senal:
             s = resultados_globales[ticker]['señal_actual']
             emoji = "📈" if s['señal'] == "LONG" else "📉"
-            print(f"    {emoji} {ticker}: {s['señal']} @ ${s['precio']:,.2f}")
+            print(f"    {emoji} {ticker}: {s['señal']} @ ${s['precio']:,.2f} ({s['probabilidad']:.1%})")
     
     print(f"\n{'='*80}")
-    print("✅ Proceso completado")
+    print("✅ Proceso completado - Solo señales FUERTES mostradas")
     print(f"{'='*80}\n")
     
     return resultados_globales
