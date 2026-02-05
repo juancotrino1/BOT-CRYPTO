@@ -30,7 +30,7 @@ import json
 import time
 import logging
 from typing import List, Optional, Dict, Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from scipy import stats
 import sqlite3
 from contextlib import contextmanager
@@ -64,82 +64,73 @@ logger = setup_logging()
 # CONFIGURACIÓN CON VALIDACIÓN
 # ============================================
 
-@dataclass
 class TradingConfig:
     """Configuración validada para el sistema"""
     
     # Zona horaria
-    TIMEZONE: pytz.timezone = pytz.timezone('America/Bogota')
+    TIMEZONE = pytz.timezone('America/Bogota')
     
     # Yahoo Finance: datos 1h limitados a 730 días
-    INTERVALO: str = "1h"
+    INTERVALO = "1h"
     
     # Periodos (ajustados a límites)
-    DIAS_ENTRENAMIENTO: int = 300  # ~10 meses
-    DIAS_VALIDACION: int = 60      # 2 meses
-    DIAS_BACKTEST: int = 30        # 1 mes
+    DIAS_ENTRENAMIENTO = 300  # ~10 meses
+    DIAS_VALIDACION = 60      # 2 meses
+    DIAS_BACKTEST = 30        # 1 mes
     
     # Activos (reducido para testing)
-    ACTIVOS: List[str] = None
-    
-    def __post_init__(self):
-        if self.ACTIVOS is None:
-            self.ACTIVOS = [
-                "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", 
-                "LINK-USD", "AAVE-USD", "NEAR-USD"
-            ]
+    ACTIVOS = [
+        "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", 
+        "LINK-USD", "AAVE-USD", "NEAR-USD"
+    ]
     
     # Features técnicas
-    VENTANA_VOLATILIDAD: int = 24
-    RSI_PERIODO: int = 14
-    ATR_PERIODO: int = 14
+    VENTANA_VOLATILIDAD = 24
+    RSI_PERIODO = 14
+    ATR_PERIODO = 14
     
     # Horizontes (solo los más estables)
-    HORIZONTES: List[int] = None
-    
-    def __post_init__(self):
-        if self.HORIZONTES is None:
-            self.HORIZONTES = [4, 8]  # 4h y 8h son más estables que 1h
+    HORIZONTES = [4, 8]  # 4h y 8h
     
     # ⚠️ COSTOS DE TRANSACCIÓN REALISTAS
-    COMISION_MAKER: float = 0.001      # 0.1% Binance Maker
-    COMISION_TAKER: float = 0.001      # 0.1% Binance Taker
-    SLIPPAGE_PROMEDIO: float = 0.0005  # 0.05% slippage promedio
-    LATENCIA_MS: int = 100             # 100ms latencia ejecución
+    COMISION_MAKER = 0.001      # 0.1% Binance Maker
+    COMISION_TAKER = 0.001      # 0.1% Binance Taker
+    SLIPPAGE_PROMEDIO = 0.0005  # 0.05% slippage promedio
+    LATENCIA_MS = 100             # 100ms latencia ejecución
     
     # Gestión de riesgo (más conservadora)
-    STOP_LOSS_PCT: float = 0.02        # 2%
-    TAKE_PROFIT_PCT: float = 0.04      # 4%
-    RATIO_MINIMO_RR: float = 1.8       # Mínimo 1.8:1
-    MAX_RIESGO_POR_OPERACION: float = 0.01  # 1% max por operación
-    MAX_OPERACIONES_DIARIAS: int = 3   # Límite diario
+    STOP_LOSS_PCT = 0.02        # 2%
+    TAKE_PROFIT_PCT = 0.04      # 4%
+    RATIO_MINIMO_RR = 1.8       # Mínimo 1.8:1
+    MAX_RIESGO_POR_OPERACION = 0.01  # 1% max por operación
+    MAX_OPERACIONES_DIARIAS = 3   # Límite diario
     
     # Validación (más estricta)
-    N_FOLDS_WF: int = 4
-    MIN_MUESTRAS_ENTRENAMIENTO: int = 500
-    MIN_MUESTRAS_CLASE: int = 30
+    N_FOLDS_WF = 4
+    MIN_MUESTRAS_ENTRENAMIENTO = 500
+    MIN_MUESTRAS_CLASE = 30
     
     # Umbrales (más realistas)
-    UMBRAL_PROBABILIDAD_MIN: float = 0.58  # 58% (no 52%)
-    UMBRAL_CONFIANZA_MIN: float = 0.60     # 60% confianza
-    UMBRAL_MOVIMIENTO: float = 0.015       # 1.5% movimiento mínimo
+    UMBRAL_PROBABILIDAD_MIN = 0.58  # 58% (no 52%)
+    UMBRAL_CONFIANZA_MIN = 0.60     # 60% confianza
+    UMBRAL_MOVIMIENTO = 0.015       # 1.5% movimiento mínimo
     
     # Filtros RSI (más estrictos)
-    RSI_EXTREME_LOW: int = 20   # No operar bajo 20
-    RSI_EXTREME_HIGH: int = 80  # No operar sobre 80
-    RSI_OVERSOLD: int = 30
-    RSI_OVERBOUGHT: int = 70
+    RSI_EXTREME_LOW = 20   # No operar bajo 20
+    RSI_EXTREME_HIGH = 80  # No operar sobre 80
+    RSI_OVERSOLD = 30
+    RSI_OVERBOUGHT = 70
     
     # Validación estadística
-    P_VALUE_MAX: float = 0.05          # Significancia estadística
-    MIN_SHARPE_RATIO: float = 1.0      # Sharpe mínimo
-    MIN_PROFIT_FACTOR: float = 1.5     # PF mínimo
-    MIN_WIN_RATE: float = 0.48         # Win rate mínimo
-    MAX_DRAWDOWN: float = 0.15         # Max DD aceptable
+    P_VALUE_MAX = 0.05          # Significancia estadística
+    MIN_SHARPE_RATIO = 1.0      # Sharpe mínimo
+    MIN_PROFIT_FACTOR = 1.5     # PF mínimo
+    MIN_WIN_RATE = 0.48         # Win rate mínimo
+    MAX_DRAWDOWN = 0.15         # Max DD aceptable
     
     # Paths
-    MODELOS_DIR: Path = Path("modelos_trading_pro")
-    DB_PATH: Path = Path("trading_data.db")
+    MODELOS_DIR = Path("modelos_trading_pro")
+    DB_PATH = Path("trading_data.db")
     
     @classmethod
     def get_fechas(cls):
@@ -163,12 +154,13 @@ class TradingConfig:
             'fecha_max_retroceso': fecha_max_retroceso
         }
     
-    def validate(self) -> bool:
+    @classmethod
+    def validate(cls) -> bool:
         """Valida configuración"""
-        assert self.RATIO_MINIMO_RR >= 1.5, "R:R debe ser >= 1.5"
-        assert self.UMBRAL_PROBABILIDAD_MIN > 0.55, "Probabilidad mín debe ser > 55%"
-        assert self.MIN_SHARPE_RATIO >= 0.5, "Sharpe debe ser >= 0.5"
-        assert len(self.ACTIVOS) > 0, "Debe haber al menos 1 activo"
+        assert cls.RATIO_MINIMO_RR >= 1.5, "R:R debe ser >= 1.5"
+        assert cls.UMBRAL_PROBABILIDAD_MIN > 0.55, "Probabilidad mín debe ser > 55%"
+        assert cls.MIN_SHARPE_RATIO >= 0.5, "Sharpe debe ser >= 0.5"
+        assert len(cls.ACTIVOS) > 0, "Debe haber al menos 1 activo"
         return True
 
 
@@ -648,7 +640,7 @@ class EtiquetadoDatos:
 class ModeloPrediccion:
     """Modelo con validación robusta"""
     
-    def __init__(self, horizonte: int, ticker: str, config: TradingConfig):
+    def __init__(self, horizonte: int, ticker: str, config):
         self.horizonte = horizonte
         self.ticker = ticker
         self.config = config
@@ -961,7 +953,7 @@ class ModeloPrediccion:
             return False
     
     @classmethod
-    def cargar(cls, path: Path, config: TradingConfig) -> 'ModeloPrediccion':
+    def cargar(cls, path: Path, config) -> 'ModeloPrediccion':
         """Carga modelo"""
         modelo_data = joblib.load(path)
         
@@ -989,7 +981,7 @@ class Backtester:
         df: pd.DataFrame, 
         modelos: Dict[int, ModeloPrediccion], 
         ticker: str,
-        config: TradingConfig,
+        config,
         db: TradingDatabase
     ):
         self.df = df
@@ -1282,7 +1274,7 @@ class Backtester:
 class SistemaTradingTicker:
     """Sistema completo para un ticker"""
     
-    def __init__(self, ticker: str, config: TradingConfig, db: TradingDatabase):
+    def __init__(self, ticker: str, config, db: TradingDatabase):
         self.ticker = ticker
         self.config = config
         self.db = db
@@ -1516,7 +1508,7 @@ class SistemaTradingTicker:
 # NOTIFICACIONES
 # ============================================
 
-def enviar_telegram(mensaje: str, config: TradingConfig) -> bool:
+def enviar_telegram(mensaje: str) -> bool:
     """Envía mensaje por Telegram"""
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -1561,15 +1553,14 @@ def main():
     logger.info("✅ Base de datos SQLite")
     logger.info("=" * 80)
     
-    # Inicializar configuración
-    config = TradingConfig()
-    config.validate()
+    # Validar configuración
+    TradingConfig.validate()
     
     # Inicializar DB
-    db = TradingDatabase(config.DB_PATH)
+    db = TradingDatabase(TradingConfig.DB_PATH)
     
     # Mostrar fechas
-    fechas = config.get_fechas()
+    fechas = TradingConfig.get_fechas()
     logger.info(f"\n📅 Configuración:")
     logger.info(f"  Fecha actual: {fechas['actual'].strftime('%Y-%m-%d %H:%M')}")
     logger.info(f"  Inicio entrenamiento: {fechas['inicio_entrenamiento'].strftime('%Y-%m-%d')}")
@@ -1578,14 +1569,14 @@ def main():
     logger.info(f"  Días totales: {(fechas['actual'] - fechas['inicio_entrenamiento']).days}")
     
     # Crear directorio para modelos
-    config.MODELOS_DIR.mkdir(exist_ok=True)
+    TradingConfig.MODELOS_DIR.mkdir(exist_ok=True)
     
     resultados_globales = {}
     
     # Procesar cada activo
-    for ticker in config.ACTIVOS:
+    for ticker in TradingConfig.ACTIVOS:
         try:
-            sistema = SistemaTradingTicker(ticker, config, db)
+            sistema = SistemaTradingTicker(ticker, TradingConfig, db)
             
             # 1. Descargar datos
             if not sistema.descargar_datos():
