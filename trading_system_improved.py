@@ -39,7 +39,17 @@ class TradingConfig:
     
     # Activos (usar símbolos correctos)
     ACTIVOS = [
-        "BTC-USD","ETH-USD","SOL-USD","BNB-USD","DOGE-USD","ADA-USD","LINK-USD","SUI20947-USD","AAVE-USD","NEAR-USD","LTC-USD","ZEC-USD","UNI7083-USD","XMR-USD","PENGU34466-USD","PENDLE-USD","HYPE32196-USD","XLM-USD","AVAX-USD","HBAR-USD","TON11419-USD"
+        "BTC-USD","ETH-USD","SOL-USD","BNB-USD","DOGE-USD","ADA-USD","LINK-USD","SUI20947-USD","AAVE-USD","NEAR-USD","LTC-USD","ZEC-USD","UNI7083-USD","XMR-USD","PENGU34466-USD","PENDLE-USD","HYPE32196-USD","XLM-USD","AVAX-USD","HBAR-USD","TON11419-USD",
+           # E-commerce / Tech
+            "AMZN","GOOG","BABA","MELI","PDD",
+            # Semiconductores / Tech
+            "NVDA","AMD","INTC","ORCL","MU",
+            # Financiero
+            "NU","BAC","PYPL","SOFI","V","BRK-B","JPM","SCHW",
+            # Entretenimiento
+            "NFLX","SONY","WBD",
+            # Energéticas
+            "XOM","NEE","CVX"
     ]
     
     # Features
