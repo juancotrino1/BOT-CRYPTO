@@ -20,6 +20,7 @@ lightgbm>=4.0.0
 optuna>=3.3.0
 ta
 catboost
+vectorbt
 # === UTILIDADES ===
 requests>=2.31.0
 # === NOTAS DE INSTALACIÓN ===
