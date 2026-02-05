@@ -1,3 +1,17 @@
+"""
+Sistema de Trading Algorítmico Mejorado
+Versión: 2.0 - Producción Ready
+
+MEJORAS PRINCIPALES:
+- Validación estadística robusta
+- Costos de transacción realistas
+- Logging estructurado
+- Gestión de errores mejorada
+- Prevención de overfitting
+- Backtesting realista
+- Monitoreo de modelo
+"""
+
 import yfinance as yf
 import numpy as np
 import pandas as pd
@@ -9,85 +23,137 @@ import warnings
 from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import joblib
 from pathlib import Path
 import json
 import time
-from typing import List, Optional
+import logging
+from typing import List, Optional, Dict, Tuple
+from dataclasses import dataclass, asdict
+from scipy import stats
+import sqlite3
+from contextlib import contextmanager
 
 warnings.filterwarnings('ignore')
 
 # ============================================
-# CONFIGURACIÓN CON LÍMITES REALISTAS
+# CONFIGURACIÓN DE LOGGING
 # ============================================
 
+def setup_logging():
+    """Configura logging estructurado"""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_dir / f'trading_{datetime.now().strftime("%Y%m%d")}.log'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+
+# ============================================
+# CONFIGURACIÓN CON VALIDACIÓN
+# ============================================
+
+@dataclass
 class TradingConfig:
-    """Configuración adaptada a límites de Yahoo Finance"""
+    """Configuración validada para el sistema"""
     
-    TIMEZONE = pytz.timezone('America/Bogota')
+    # Zona horaria
+    TIMEZONE: pytz.timezone = pytz.timezone('America/Bogota')
     
-    # Yahoo Finance limita datos 1h a últimos 730 días
-    INTERVALO = "1h"
+    # Yahoo Finance: datos 1h limitados a 730 días
+    INTERVALO: str = "1h"
     
-    # Ajustado para límites de Yahoo
-    DIAS_ENTRENAMIENTO = 365    # 1 año
-    DIAS_VALIDACION = 60        # 2 meses
-    DIAS_BACKTEST = 30          # 1 mes
+    # Periodos (ajustados a límites)
+    DIAS_ENTRENAMIENTO: int = 300  # ~10 meses
+    DIAS_VALIDACION: int = 60      # 2 meses
+    DIAS_BACKTEST: int = 30        # 1 mes
     
-    # Total máximo = 455 días (dentro de 730 días)
+    # Activos (reducido para testing)
+    ACTIVOS: List[str] = None
     
-    # Activos (usar símbolos correctos)
-    ACTIVOS = [
-        "BTC-USD","ETH-USD","SOL-USD","BNB-USD","DOGE-USD","ADA-USD","LINK-USD","SUI20947-USD","AAVE-USD","NEAR-USD","LTC-USD","ZEC-USD","UNI7083-USD","XMR-USD","PENGU34466-USD","PENDLE-USD"
-    ]
+    def __post_init__(self):
+        if self.ACTIVOS is None:
+            self.ACTIVOS = [
+                "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", 
+                "LINK-USD", "AAVE-USD", "NEAR-USD"
+            ]
     
-    # Features
-    VENTANA_VOLATILIDAD = 24
-    RSI_PERIODO = 14
-    ATR_PERIODO = 14
+    # Features técnicas
+    VENTANA_VOLATILIDAD: int = 24
+    RSI_PERIODO: int = 14
+    ATR_PERIODO: int = 14
     
-    # Horizontes cortos
-    HORIZONTES = [1, 2, 4, 8]
+    # Horizontes (solo los más estables)
+    HORIZONTES: List[int] = None
     
-    # Gestión de riesgo
-    STOP_LOSS_PCT = 0.015
-    TAKE_PROFIT_PCT = 0.030
-    RATIO_MINIMO_RR = 1.5
-    MAX_RIESGO_POR_OPERACION = 0.02
+    def __post_init__(self):
+        if self.HORIZONTES is None:
+            self.HORIZONTES = [4, 8]  # 4h y 8h son más estables que 1h
     
-    # Validación
-    N_FOLDS_WF = 3
-    MIN_MUESTRAS_ENTRENAMIENTO = 300
-    MIN_MUESTRAS_CLASE = 20
+    # ⚠️ COSTOS DE TRANSACCIÓN REALISTAS
+    COMISION_MAKER: float = 0.001      # 0.1% Binance Maker
+    COMISION_TAKER: float = 0.001      # 0.1% Binance Taker
+    SLIPPAGE_PROMEDIO: float = 0.0005  # 0.05% slippage promedio
+    LATENCIA_MS: int = 100             # 100ms latencia ejecución
     
-    # Umbrales realistas
-    UMBRAL_PROBABILIDAD_MIN = 0.52
-    UMBRAL_CONFIANZA_MIN = 0.51
-    UMBRAL_MOVIMIENTO = 0.008  # 0.8%
+    # Gestión de riesgo (más conservadora)
+    STOP_LOSS_PCT: float = 0.02        # 2%
+    TAKE_PROFIT_PCT: float = 0.04      # 4%
+    RATIO_MINIMO_RR: float = 1.8       # Mínimo 1.8:1
+    MAX_RIESGO_POR_OPERACION: float = 0.01  # 1% max por operación
+    MAX_OPERACIONES_DIARIAS: int = 3   # Límite diario
     
-    # Filtros RSI
-    RSI_EXTREME_LOW = 10
-    RSI_EXTREME_HIGH = 90
+    # Validación (más estricta)
+    N_FOLDS_WF: int = 4
+    MIN_MUESTRAS_ENTRENAMIENTO: int = 500
+    MIN_MUESTRAS_CLASE: int = 30
     
-    MODELOS_DIR = Path("modelos_trading")
+    # Umbrales (más realistas)
+    UMBRAL_PROBABILIDAD_MIN: float = 0.58  # 58% (no 52%)
+    UMBRAL_CONFIANZA_MIN: float = 0.60     # 60% confianza
+    UMBRAL_MOVIMIENTO: float = 0.015       # 1.5% movimiento mínimo
+    
+    # Filtros RSI (más estrictos)
+    RSI_EXTREME_LOW: int = 20   # No operar bajo 20
+    RSI_EXTREME_HIGH: int = 80  # No operar sobre 80
+    RSI_OVERSOLD: int = 30
+    RSI_OVERBOUGHT: int = 70
+    
+    # Validación estadística
+    P_VALUE_MAX: float = 0.05          # Significancia estadística
+    MIN_SHARPE_RATIO: float = 1.0      # Sharpe mínimo
+    MIN_PROFIT_FACTOR: float = 1.5     # PF mínimo
+    MIN_WIN_RATE: float = 0.48         # Win rate mínimo
+    MAX_DRAWDOWN: float = 0.15         # Max DD aceptable
+    
+    # Paths
+    MODELOS_DIR: Path = Path("modelos_trading_pro")
+    DB_PATH: Path = Path("trading_data.db")
     
     @classmethod
     def get_fechas(cls):
+        """Calcula fechas respetando límites de Yahoo"""
         now = datetime.now(cls.TIMEZONE)
-        
-        # Asegurar que no excedamos límites de Yahoo
-        fecha_max_retroceso = now - timedelta(days=730)  # Límite de Yahoo
+        fecha_max_retroceso = now - timedelta(days=730)
         
         inicio_backtest = now - timedelta(days=cls.DIAS_BACKTEST)
         inicio_validacion = inicio_backtest - timedelta(days=cls.DIAS_VALIDACION)
         inicio_entrenamiento = inicio_validacion - timedelta(days=cls.DIAS_ENTRENAMIENTO)
         
-        # Asegurar que no vamos más allá del límite
         if inicio_entrenamiento < fecha_max_retroceso:
-            print(f"  ⚠️ Ajustando fechas por límite de Yahoo Finance")
+            logger.warning("⚠️ Ajustando fechas por límite de Yahoo Finance")
             inicio_entrenamiento = fecha_max_retroceso
-            inicio_validacion = inicio_entrenamiento + timedelta(days=cls.DIAS_ENTRENAMIENTO - cls.DIAS_VALIDACION)
         
         return {
             'actual': now,
@@ -96,98 +162,240 @@ class TradingConfig:
             'inicio_backtest': inicio_backtest,
             'fecha_max_retroceso': fecha_max_retroceso
         }
+    
+    def validate(self) -> bool:
+        """Valida configuración"""
+        assert self.RATIO_MINIMO_RR >= 1.5, "R:R debe ser >= 1.5"
+        assert self.UMBRAL_PROBABILIDAD_MIN > 0.55, "Probabilidad mín debe ser > 55%"
+        assert self.MIN_SHARPE_RATIO >= 0.5, "Sharpe debe ser >= 0.5"
+        assert len(self.ACTIVOS) > 0, "Debe haber al menos 1 activo"
+        return True
 
 
 # ============================================
-# DESCARGA INTELIGENTE POR PARTES
+# BASE DE DATOS
+# ============================================
+
+class TradingDatabase:
+    """Gestión de persistencia con SQLite"""
+    
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.init_database()
+    
+    @contextmanager
+    def get_connection(self):
+        """Context manager para conexiones"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error en DB: {e}")
+            raise
+        finally:
+            conn.close()
+    
+    def init_database(self):
+        """Crea tablas si no existen"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Tabla de operaciones
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operaciones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha TIMESTAMP,
+                    ticker TEXT,
+                    direccion TEXT,
+                    precio_entrada REAL,
+                    stop_loss REAL,
+                    take_profit REAL,
+                    ratio_rr REAL,
+                    probabilidad REAL,
+                    confianza REAL,
+                    resultado TEXT,
+                    retorno REAL,
+                    comision REAL,
+                    retorno_neto REAL,
+                    velas_hasta_cierre INTEGER,
+                    modo TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Tabla de métricas de modelo
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS metricas_modelo (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha TIMESTAMP,
+                    ticker TEXT,
+                    horizonte INTEGER,
+                    accuracy REAL,
+                    precision_score REAL,
+                    recall_score REAL,
+                    f1_score REAL,
+                    sharpe_ratio REAL,
+                    profit_factor REAL,
+                    win_rate REAL,
+                    max_drawdown REAL,
+                    n_operaciones INTEGER,
+                    retorno_total REAL,
+                    p_value REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Tabla de señales
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS senales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha TIMESTAMP,
+                    ticker TEXT,
+                    senal TEXT,
+                    precio REAL,
+                    probabilidad REAL,
+                    confianza REAL,
+                    fuerza TEXT,
+                    enviada BOOLEAN,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            logger.info("✅ Base de datos inicializada")
+    
+    def guardar_operacion(self, operacion: Dict):
+        """Guarda operación en DB"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO operaciones (
+                    fecha, ticker, direccion, precio_entrada, stop_loss, 
+                    take_profit, ratio_rr, probabilidad, confianza, resultado, 
+                    retorno, comision, retorno_neto, velas_hasta_cierre, modo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                operacion['fecha'],
+                operacion['ticker'],
+                operacion['direccion'],
+                operacion['precio_entrada'],
+                operacion['stop_loss'],
+                operacion['take_profit'],
+                operacion['ratio_rr'],
+                operacion.get('probabilidad', 0),
+                operacion.get('confianza', 0),
+                operacion['resultado'],
+                operacion['retorno'],
+                operacion.get('comision', 0),
+                operacion.get('retorno_neto', 0),
+                operacion['velas_hasta_cierre'],
+                operacion.get('modo', 'backtest')
+            ))
+    
+    def guardar_metricas(self, ticker: str, horizonte: int, metricas: Dict):
+        """Guarda métricas de modelo"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO metricas_modelo (
+                    fecha, ticker, horizonte, accuracy, precision_score, 
+                    recall_score, f1_score, sharpe_ratio, profit_factor, 
+                    win_rate, max_drawdown, n_operaciones, retorno_total, p_value
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                datetime.now(),
+                ticker,
+                horizonte,
+                metricas.get('accuracy', 0),
+                metricas.get('precision', 0),
+                metricas.get('recall', 0),
+                metricas.get('f1', 0),
+                metricas.get('sharpe_ratio', 0),
+                metricas.get('profit_factor', 0),
+                metricas.get('tasa_exito', 0),
+                metricas.get('max_drawdown', 0),
+                metricas.get('n_operaciones', 0),
+                metricas.get('retorno_total', 0),
+                metricas.get('p_value', 1.0)
+            ))
+    
+    def obtener_ultimas_operaciones(self, ticker: str, limit: int = 10) -> pd.DataFrame:
+        """Obtiene últimas operaciones de un ticker"""
+        with self.get_connection() as conn:
+            query = """
+                SELECT * FROM operaciones 
+                WHERE ticker = ? 
+                ORDER BY fecha DESC 
+                LIMIT ?
+            """
+            return pd.read_sql_query(query, conn, params=(ticker, limit))
+
+
+# ============================================
+# DESCARGA DE DATOS
 # ============================================
 
 class YahooDataDownloader:
-    """Descarga datos de Yahoo Finance respetando límites"""
+    """Descarga inteligente con reintentos y validación"""
     
     @staticmethod
-    def descargar_por_partes(ticker: str, fecha_inicio: datetime, fecha_fin: datetime, 
-                            intervalo: str = "1h", max_dias_por_chunk: int = 180) -> pd.DataFrame:
-        """
-        Descarga datos por partes para evitar límites de Yahoo Finance
-        """
-        print(f"  📥 Descargando {ticker} ({intervalo})...")
-        print(f"    Periodo: {fecha_inicio.date()} a {fecha_fin.date()}")
+    def validar_datos(df: pd.DataFrame, ticker: str) -> Tuple[bool, str]:
+        """Valida calidad de datos descargados"""
+        if df.empty:
+            return False, "DataFrame vacío"
         
-        # Calcular número de chunks necesarios
-        dias_totales = (fecha_fin - fecha_inicio).days
-        num_chunks = max(1, dias_totales // max_dias_por_chunk + 1)
+        # Verificar columnas necesarias
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            return False, f"Faltan columnas: {missing}"
         
-        print(f"    Dividiendo en {num_chunks} chunks...")
+        # Verificar valores nulos
+        null_pct = df[required_cols].isnull().sum().sum() / (len(df) * len(required_cols))
+        if null_pct > 0.05:  # Más de 5% nulos
+            return False, f"Demasiados valores nulos: {null_pct:.1%}"
         
-        chunks = []
-        chunk_size = dias_totales / num_chunks
+        # Verificar precios válidos
+        if (df['Close'] <= 0).any():
+            return False, "Precios negativos o cero detectados"
         
-        for i in range(num_chunks):
-            chunk_start = fecha_inicio + timedelta(days=i * chunk_size)
-            chunk_end = fecha_inicio + timedelta(days=(i + 1) * chunk_size)
-            
-            # Asegurar que no superemos fecha_fin
-            if chunk_end > fecha_fin:
-                chunk_end = fecha_fin
-            
-            # Pequeña pausa para evitar rate limiting
-            if i > 0:
-                time.sleep(0.5)
-            
-            try:
-                print(f"    Chunk {i+1}/{num_chunks}: {chunk_start.date()} a {chunk_end.date()}")
-                
-                df_chunk = yf.download(
-                    ticker,
-                    start=chunk_start,
-                    end=chunk_end,
-                    interval=intervalo,
-                    progress=False,
-                    threads=False
-                )
-                
-                if not df_chunk.empty:
-                    chunks.append(df_chunk)
-                    print(f"      ✅ {len(df_chunk)} velas descargadas")
-                else:
-                    print(f"      ⚠️ Chunk vacío")
-                    
-            except Exception as e:
-                print(f"      ❌ Error en chunk {i+1}: {e}")
-                continue
+        # Verificar High >= Low
+        if (df['High'] < df['Low']).any():
+            return False, "High < Low detectado"
         
-        # Combinar chunks
-        if chunks:
-            df_completo = pd.concat(chunks)
-            df_completo = df_completo[~df_completo.index.duplicated(keep='first')]
-            df_completo.sort_index(inplace=True)
-            
-            # Asegurar columnas
-            if isinstance(df_completo.columns, pd.MultiIndex):
-                df_completo.columns = df_completo.columns.get_level_values(0)
-            
-            columnas_necesarias = ['Open', 'High', 'Low', 'Close', 'Volume']
-            for col in columnas_necesarias:
-                if col not in df_completo.columns:
-                    print(f"    ⚠️ Columna {col} no encontrada")
-            
-            df_completo = df_completo[columnas_necesarias].dropna()
-            
-            print(f"    📊 Total: {len(df_completo)} velas")
-            return df_completo
+        # Verificar gaps extremos (>50% en una vela)
+        returns = df['Close'].pct_change().abs()
+        if (returns > 0.5).any():
+            logger.warning(f"⚠️ {ticker}: Gaps extremos detectados (>50%)")
         
-        return pd.DataFrame()
+        # Verificar continuidad temporal
+        time_diffs = df.index.to_series().diff()
+        expected_diff = pd.Timedelta(hours=1)
+        gaps = time_diffs[time_diffs > expected_diff * 2]  # Gaps > 2 horas
+        
+        if len(gaps) > len(df) * 0.1:  # Más de 10% con gaps
+            logger.warning(f"⚠️ {ticker}: Muchos gaps temporales ({len(gaps)})")
+        
+        return True, "OK"
     
     @staticmethod
-    def descargar_con_reintentos(ticker: str, fecha_inicio: datetime, fecha_fin: datetime, 
-                                intervalo: str = "1h", max_reintentos: int = 3) -> pd.DataFrame:
-        """
-        Intenta descargar con reintentos si falla
-        """
+    def descargar_con_reintentos(
+        ticker: str, 
+        fecha_inicio: datetime, 
+        fecha_fin: datetime,
+        intervalo: str = "1h", 
+        max_reintentos: int = 3
+    ) -> pd.DataFrame:
+        """Descarga con reintentos y validación"""
+        
         for intento in range(max_reintentos):
             try:
-                print(f"  Intento {intento+1}/{max_reintentos}...")
+                logger.info(f"📥 Descargando {ticker} (intento {intento+1}/{max_reintentos})...")
+                
+                # Pequeña pausa entre reintentos
+                if intento > 0:
+                    time.sleep(2 ** intento)
                 
                 df = yf.download(
                     ticker,
@@ -195,53 +403,72 @@ class YahooDataDownloader:
                     end=fecha_fin,
                     interval=intervalo,
                     progress=False,
-                    threads=False
+                    threads=False,
+                    auto_adjust=True  # Ajustar por splits/dividendos
                 )
                 
-                if not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    
-                    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-                    return df
+                if df.empty:
+                    logger.warning(f"  ⚠️ Descarga vacía para {ticker}")
+                    continue
+                
+                # Normalizar columnas
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                
+                # Asegurar columnas necesarias
+                required = ['Open', 'High', 'Low', 'Close', 'Volume']
+                df = df[required].copy()
+                
+                # Limpiar datos
+                df = df.dropna()
+                df = df[df['Close'] > 0]
+                df = df[~df.index.duplicated(keep='first')]
+                df = df.sort_index()
+                
+                # Validar calidad
+                is_valid, msg = YahooDataDownloader.validar_datos(df, ticker)
+                if not is_valid:
+                    logger.error(f"  ❌ Validación falló: {msg}")
+                    continue
+                
+                logger.info(f"  ✅ {len(df)} velas descargadas ({df.index[0].date()} a {df.index[-1].date()})")
+                return df
                 
             except Exception as e:
-                print(f"    Intento {intento+1} falló: {e}")
-                
-                if intento < max_reintentos - 1:
-                    wait_time = 2 ** intento  # Backoff exponencial
-                    print(f"    Esperando {wait_time} segundos...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"    Todos los intentos fallaron para {ticker}")
+                logger.error(f"  ❌ Error descargando {ticker}: {e}")
+                if intento == max_reintentos - 1:
+                    logger.error(f"  ❌ Todos los intentos fallaron para {ticker}")
         
         return pd.DataFrame()
 
 
 # ============================================
-# INDICADORES TÉCNICOS (sin cambios desde versión anterior)
+# INDICADORES TÉCNICOS
 # ============================================
 
 class IndicadoresTecnicos:
-    """Features calculadas SOLO con datos pasados"""
+    """Features técnicas sin look-ahead bias"""
     
     @staticmethod
-    def calcular_rsi(precios, periodo=14):
+    def calcular_rsi(precios: pd.Series, periodo: int = 14) -> pd.Series:
         """RSI sin look-ahead"""
         delta = precios.diff()
-        ganancia = delta.where(delta > 0, 0).rolling(window=periodo).mean()
-        perdida = (-delta.where(delta < 0, 0)).rolling(window=periodo).mean()
+        ganancia = delta.where(delta > 0, 0).rolling(window=periodo, min_periods=periodo).mean()
+        perdida = (-delta.where(delta < 0, 0)).rolling(window=periodo, min_periods=periodo).mean()
+        
+        # Evitar división por cero
         perdida = perdida.replace(0, 1e-10)
         rs = ganancia / perdida
-        return (100 - (100 / (1 + rs))).fillna(50)
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi.fillna(50)
     
     @staticmethod
-    def calcular_atr(df, periodo=14):
+    def calcular_atr(df: pd.DataFrame, periodo: int = 14) -> pd.Series:
         """ATR sin look-ahead"""
         high = df['High']
         low = df['Low']
-        close = df['Close']
-        close_prev = close.shift(1)
+        close_prev = df['Close'].shift(1)
         
         tr = pd.concat([
             high - low,
@@ -249,150 +476,292 @@ class IndicadoresTecnicos:
             (low - close_prev).abs()
         ], axis=1).max(axis=1)
         
-        return tr.rolling(window=periodo).mean().fillna(method='bfill')
+        atr = tr.rolling(window=periodo, min_periods=periodo).mean()
+        return atr.fillna(method='bfill')
     
     @staticmethod
-    def calcular_features(df):
+    def calcular_features(df: pd.DataFrame) -> pd.DataFrame:
         """
         ✅ CRÍTICO: Todas las features usan .shift(1) para evitar look-ahead
         """
         df = df.copy()
         
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        
         close = df['Close']
         high = df['High']
         low = df['Low']
-        volume = df.get('Volume', pd.Series(1, index=df.index))
+        volume = df['Volume']
         
-        # ✅ RETORNOS PASADOS (shift = 1)
-        df['retorno_1h'] = close.pct_change(1).shift(1)
-        df['retorno_4h'] = close.pct_change(4).shift(1)
-        df['retorno_12h'] = close.pct_change(12).shift(1)
-        df['retorno_24h'] = close.pct_change(24).shift(1)
+        # === RETORNOS PASADOS ===
+        for periodo in [1, 4, 8, 12, 24]:
+            df[f'retorno_{periodo}h'] = close.pct_change(periodo).shift(1)
         
-        # ✅ VOLATILIDAD PASADA
+        # === VOLATILIDAD PASADA ===
         retornos = close.pct_change(1)
+        df['volatilidad_6h'] = retornos.rolling(6).std().shift(1)
+        df['volatilidad_12h'] = retornos.rolling(12).std().shift(1)
         df['volatilidad_24h'] = retornos.rolling(24).std().shift(1)
         
-        # ✅ RSI PASADO (múltiples)
-        for periodo in [7, 14, 21]:
+        # === RSI PASADO ===
+        for periodo in [14, 21]:  # Reducir redundancia
             rsi_raw = IndicadoresTecnicos.calcular_rsi(close, periodo)
             df[f'RSI_{periodo}'] = rsi_raw.shift(1)
         
-        # ✅ MEDIAS MÓVILES PASADAS
+        # === MEDIAS MÓVILES PASADAS ===
         for periodo in [12, 24, 50]:
-            sma = close.rolling(periodo).mean().shift(1)
+            sma = close.rolling(periodo, min_periods=periodo).mean().shift(1)
             df[f'SMA_{periodo}'] = sma
-            df[f'dist_sma_{periodo}'] = (close.shift(1) - sma) / sma
+            df[f'dist_sma_{periodo}'] = ((close.shift(1) - sma) / sma)
         
-        # ✅ EMA PASADAS
-        for periodo in [12, 26]:
-            ema = close.ewm(span=periodo, adjust=False).mean().shift(1)
-            df[f'EMA_{periodo}'] = ema
+        # === EMA PASADAS ===
+        ema_12 = close.ewm(span=12, adjust=False).mean().shift(1)
+        ema_26 = close.ewm(span=26, adjust=False).mean().shift(1)
+        df['EMA_12'] = ema_12
+        df['EMA_26'] = ema_26
+        df['MACD'] = ema_12 - ema_26
         
-        # ✅ ATR PASADO
+        # === ATR PASADO ===
         atr = IndicadoresTecnicos.calcular_atr(df, 14)
         df['ATR'] = atr.shift(1)
         df['ATR_pct'] = (atr / close).shift(1)
         
-        # ✅ VOLUMEN RELATIVO PASADO
-        vol_ma = volume.rolling(24).mean()
-        df['volumen_rel'] = (volume / vol_ma).shift(1)
+        # === VOLUMEN RELATIVO ===
+        vol_ma_24 = volume.rolling(24, min_periods=24).mean()
+        df['volumen_rel'] = (volume / vol_ma_24).shift(1)
         
-        # ✅ RANGO HL PASADO
+        # === RANGO HL ===
         rango = (high - low) / close
         df['rango_hl_pct'] = rango.shift(1)
+        df['rango_hl_ma'] = rango.rolling(12).mean().shift(1)
         
-        # ✅ TENDENCIA PASADA
+        # === TENDENCIA ===
         df['tendencia'] = (df['SMA_12'] > df['SMA_24']).astype(int)
         
-        # ✅ MOMENTUM PASADO
+        # === MOMENTUM ===
+        df['momentum_12h'] = (close / close.shift(12) - 1).shift(1)
         df['momentum_24h'] = (close / close.shift(24) - 1).shift(1)
         
-        # ✅ BANDAS DE BOLLINGER
-        df['SMA_20'] = close.rolling(20).mean().shift(1)
-        df['std_20'] = close.rolling(20).std().shift(1)
-        df['bb_upper'] = df['SMA_20'] + (df['std_20'] * 2)
-        df['bb_lower'] = df['SMA_20'] - (df['std_20'] * 2)
+        # === BOLLINGER BANDS ===
+        sma_20 = close.rolling(20, min_periods=20).mean().shift(1)
+        std_20 = close.rolling(20, min_periods=20).std().shift(1)
+        df['bb_upper'] = sma_20 + (std_20 * 2)
+        df['bb_lower'] = sma_20 - (std_20 * 2)
         df['bb_position'] = (close.shift(1) - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+        
+        # === VOLATILIDAD RELATIVA ===
+        df['vol_ratio'] = df['volatilidad_6h'] / df['volatilidad_24h']
         
         return df
 
 
 # ============================================
-# ETIQUETADO (sin cambios)
+# ETIQUETADO
 # ============================================
 
 class EtiquetadoDatos:
+    """Etiquetado con umbrales dinámicos"""
     
     @staticmethod
-    def crear_etiquetas_direccion(df, horizonte):
-        """Etiquetado con umbral dinámico"""
+    def crear_etiquetas_direccion(df: pd.DataFrame, horizonte: int) -> Tuple[pd.Series, pd.Series]:
+        """
+        Etiquetado con umbral dinámico basado en volatilidad
+        
+        Returns:
+            (etiquetas, retornos_futuros)
+        """
+        # Retorno futuro
         retorno_futuro = df['Close'].shift(-horizonte) / df['Close'] - 1
         
-        # Umbral dinámico basado en volatilidad
-        volatilidad = df['Close'].pct_change().rolling(24).std().fillna(0.01)
-        umbral_dinamico = volatilidad * 1.5
+        # Umbral dinámico basado en volatilidad reciente
+        volatilidad = df['Close'].pct_change().rolling(24).std().fillna(0.015)
+        umbral_dinamico = volatilidad * 2.0  # 2x la volatilidad
         
+        # Limitar umbral entre 1% y 2.5%
+        umbral_usado = umbral_dinamico.clip(lower=0.01, upper=0.025)
+        
+        # Crear etiquetas
         etiqueta = pd.Series(np.nan, index=df.index)
-        umbral_usado = umbral_dinamico.clip(lower=0.006, upper=0.012)
-        
         etiqueta[retorno_futuro > umbral_usado] = 1   # LONG
         etiqueta[retorno_futuro < -umbral_usado] = 0  # SHORT
+        # Entre umbrales = NaN (no operar - zona neutral)
+        
+        # Logging de distribución
+        dist = etiqueta.value_counts()
+        total = len(etiqueta.dropna())
+        if total > 0:
+            logger.info(f"    Etiquetas {horizonte}h: LONG={dist.get(1,0)} ({dist.get(1,0)/total:.1%}), "
+                       f"SHORT={dist.get(0,0)} ({dist.get(0,0)/total:.1%}), "
+                       f"NEUTRAL={etiqueta.isna().sum()} ({etiqueta.isna().sum()/len(etiqueta):.1%})")
         
         return etiqueta, retorno_futuro
     
     @staticmethod
-    def preparar_dataset_ml(df, horizonte):
-        """Prepara dataset con features sin look-ahead"""
+    def preparar_dataset_ml(df: pd.DataFrame, horizonte: int) -> Tuple[pd.DataFrame, List[str]]:
+        """Prepara dataset completo para ML"""
+        
+        # Calcular features
         df = IndicadoresTecnicos.calcular_features(df)
+        
+        # Crear etiquetas
         etiqueta, retorno_futuro = EtiquetadoDatos.crear_etiquetas_direccion(df, horizonte)
         
         df[f'etiqueta_{horizonte}h'] = etiqueta
         df[f'retorno_futuro_{horizonte}h'] = retorno_futuro
         
-        # Features finales
+        # Lista de features (sin redundancia excesiva)
         features_base = [
-            'RSI_7', 'RSI_14', 'RSI_21',
-            'volatilidad_24h',
+            # RSI
+            'RSI_14', 'RSI_21',
+            # Volatilidad
+            'volatilidad_12h', 'volatilidad_24h', 'vol_ratio',
+            # Distancias a medias
             'dist_sma_12', 'dist_sma_24', 'dist_sma_50',
+            # MACD
+            'MACD',
+            # ATR
             'ATR_pct',
+            # Tendencia
             'tendencia',
-            'retorno_1h', 'retorno_4h', 'retorno_12h', 'retorno_24h',
+            # Retornos
+            'retorno_1h', 'retorno_4h', 'retorno_8h', 'retorno_24h',
+            # Volumen
             'volumen_rel',
-            'rango_hl_pct',
-            'momentum_24h',
+            # Rango
+            'rango_hl_pct', 'rango_hl_ma',
+            # Momentum
+            'momentum_12h', 'momentum_24h',
+            # Bollinger
             'bb_position'
         ]
         
+        # Filtrar solo features disponibles
         features_disponibles = [f for f in features_base if f in df.columns]
+        
+        logger.info(f"    Features disponibles: {len(features_disponibles)}")
         
         return df, features_disponibles
 
 
 # ============================================
-# MODELO (optimizado)
+# MODELO CON VALIDACIÓN ESTADÍSTICA
 # ============================================
 
 class ModeloPrediccion:
+    """Modelo con validación robusta"""
     
-    def __init__(self, horizonte, ticker):
+    def __init__(self, horizonte: int, ticker: str, config: TradingConfig):
         self.horizonte = horizonte
         self.ticker = ticker
+        self.config = config
         self.modelo = None
         self.scaler = None
         self.features = None
         self.metricas_validacion = {}
-        self.feature_importance = None
+        self.feature_importance = {}
+        self.is_valid = False
     
-    def entrenar_walk_forward(self, df, features, etiqueta_col):
-        """Walk-forward simplificado"""
+    def seleccionar_features(
+        self, 
+        X_train: pd.DataFrame, 
+        y_train: pd.Series, 
+        max_features: int = 15
+    ) -> List[str]:
+        """
+        ✅ Selección de features SOLO con datos de entrenamiento
+        """
+        from sklearn.feature_selection import mutual_info_classif
+        
+        # Calcular mutual information
+        mi_scores = mutual_info_classif(
+            X_train.fillna(0), 
+            y_train, 
+            random_state=42
+        )
+        
+        # Crear DataFrame de scores
+        feature_scores = pd.DataFrame({
+            'feature': X_train.columns,
+            'score': mi_scores
+        }).sort_values('score', ascending=False)
+        
+        # Seleccionar top features
+        selected = feature_scores.head(max_features)['feature'].tolist()
+        
+        logger.info(f"    Top 5 features seleccionadas:")
+        for idx, row in feature_scores.head(5).iterrows():
+            logger.info(f"      {row['feature']}: {row['score']:.4f}")
+        
+        return selected
+    
+    def validar_estadisticamente(
+        self, 
+        retornos: np.ndarray
+    ) -> Tuple[bool, Dict]:
+        """
+        ✅ Validación estadística robusta
+        """
+        # Test t de Student: ¿retornos significativamente > 0?
+        t_stat, p_value = stats.ttest_1samp(retornos, 0)
+        
+        # Sharpe ratio
+        sharpe = retornos.mean() / retornos.std() * np.sqrt(365*24) if retornos.std() > 0 else 0
+        
+        # Profit factor
+        ganancias = retornos[retornos > 0].sum()
+        perdidas = abs(retornos[retornos < 0].sum())
+        profit_factor = ganancias / perdidas if perdidas > 0 else np.inf
+        
+        # Win rate
+        win_rate = (retornos > 0).sum() / len(retornos)
+        
+        # Max drawdown
+        equity_curve = (1 + retornos).cumprod()
+        drawdown = (equity_curve / equity_curve.cummax() - 1).min()
+        
+        resultados = {
+            'p_value': p_value,
+            't_statistic': t_stat,
+            'sharpe_ratio': sharpe,
+            'profit_factor': profit_factor,
+            'win_rate': win_rate,
+            'max_drawdown': drawdown,
+            'retorno_medio': retornos.mean(),
+            'retorno_std': retornos.std()
+        }
+        
+        # Criterios de aceptación
+        criterios = [
+            p_value < self.config.P_VALUE_MAX,
+            sharpe >= self.config.MIN_SHARPE_RATIO,
+            profit_factor >= self.config.MIN_PROFIT_FACTOR,
+            win_rate >= self.config.MIN_WIN_RATE,
+            abs(drawdown) <= self.config.MAX_DRAWDOWN
+        ]
+        
+        es_valido = sum(criterios) >= 4  # Al menos 4 de 5 criterios
+        
+        logger.info(f"    Validación estadística:")
+        logger.info(f"      {'✅' if criterios[0] else '❌'} p-value: {p_value:.4f} (< {self.config.P_VALUE_MAX})")
+        logger.info(f"      {'✅' if criterios[1] else '❌'} Sharpe: {sharpe:.2f} (>= {self.config.MIN_SHARPE_RATIO})")
+        logger.info(f"      {'✅' if criterios[2] else '❌'} Profit Factor: {profit_factor:.2f} (>= {self.config.MIN_PROFIT_FACTOR})")
+        logger.info(f"      {'✅' if criterios[3] else '❌'} Win Rate: {win_rate:.2%} (>= {self.config.MIN_WIN_RATE:.0%})")
+        logger.info(f"      {'✅' if criterios[4] else '❌'} Max DD: {drawdown:.2%} (<= {self.config.MAX_DRAWDOWN:.0%})")
+        
+        return es_valido, resultados
+    
+    def entrenar_walk_forward(
+        self, 
+        df: pd.DataFrame, 
+        features: List[str], 
+        etiqueta_col: str
+    ) -> bool:
+        """
+        ✅ Walk-forward validation con validación estadística
+        """
+        # Limpiar datos
         df_valido = df.dropna(subset=[etiqueta_col] + features).copy()
         
-        if len(df_valido) < TradingConfig.MIN_MUESTRAS_ENTRENAMIENTO:
-            print(f"    ⚠️ Datos insuficientes: {len(df_valido)} (necesita {TradingConfig.MIN_MUESTRAS_ENTRENAMIENTO})")
+        if len(df_valido) < self.config.MIN_MUESTRAS_ENTRENAMIENTO:
+            logger.warning(f"    ⚠️ Datos insuficientes: {len(df_valido)}")
             return False
         
         X = df_valido[features]
@@ -400,31 +769,58 @@ class ModeloPrediccion:
         
         # Verificar balance de clases
         class_counts = y.value_counts()
-        if len(class_counts) < 2 or class_counts.min() < TradingConfig.MIN_MUESTRAS_CLASE:
-            print(f"    ⚠️ Clases desbalanceadas: LONG={class_counts.get(1, 0)}, SHORT={class_counts.get(0, 0)}")
+        if len(class_counts) < 2:
+            logger.warning(f"    ⚠️ Solo una clase presente")
             return False
         
-        print(f"    📊 Muestras: {len(X)} | LONG: {class_counts.get(1, 0)} | SHORT: {class_counts.get(0, 0)}")
+        if class_counts.min() < self.config.MIN_MUESTRAS_CLASE:
+            logger.warning(f"    ⚠️ Clase minoritaria insuficiente: {class_counts.min()}")
+            return False
         
-        # Cross-validation simple
-        tscv = TimeSeriesSplit(n_splits=3, test_size=300, gap=self.horizonte)
-        scores = []
+        logger.info(f"    Muestras: {len(X)} | LONG: {class_counts.get(1,0)} | SHORT: {class_counts.get(0,0)}")
+        
+        # Walk-forward cross-validation
+        tscv = TimeSeriesSplit(
+            n_splits=self.config.N_FOLDS_WF,
+            test_size=max(200, len(X) // 10),
+            gap=self.horizonte * 2
+        )
+        
+        fold_scores = []
+        fold_predictions = []
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X), 1):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
             
-            scaler = RobustScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_val_scaled = scaler.transform(X_val)
+            # Verificar clases en fold
+            if len(y_train.unique()) < 2 or len(y_val.unique()) < 2:
+                logger.warning(f"      Fold {fold}: Clases insuficientes, saltando...")
+                continue
             
-            # Modelo simple
+            # Seleccionar features (solo con datos de entrenamiento)
+            if fold == 1:
+                self.features = self.seleccionar_features(
+                    X_train[features], 
+                    y_train, 
+                    max_features=15
+                )
+            
+            X_train_sel = X_train[self.features]
+            X_val_sel = X_val[self.features]
+            
+            # Escalar
+            scaler = RobustScaler()
+            X_train_scaled = scaler.fit_transform(X_train_sel)
+            X_val_scaled = scaler.transform(X_val_sel)
+            
+            # Modelo
             modelo = RandomForestClassifier(
-                n_estimators=50,
-                max_depth=5,
+                n_estimators=100,
+                max_depth=8,
                 min_samples_split=20,
                 min_samples_leaf=10,
-                max_features=0.5,
+                max_features='sqrt',
                 class_weight='balanced',
                 random_state=42,
                 n_jobs=-1
@@ -432,70 +828,89 @@ class ModeloPrediccion:
             
             modelo.fit(X_train_scaled, y_train)
             
+            # Predicciones
             y_pred = modelo.predict(X_val_scaled)
             y_proba = modelo.predict_proba(X_val_scaled)
             
             # Métricas
             acc = accuracy_score(y_val, y_pred)
-            prec = precision_score(y_val, y_pred, zero_division=0)
-            rec = recall_score(y_val, y_pred, zero_division=0)
+            prec = precision_score(y_val, y_pred, zero_division=0, average='binary')
+            rec = recall_score(y_val, y_pred, zero_division=0, average='binary')
+            f1 = f1_score(y_val, y_pred, zero_division=0, average='binary')
             
-            scores.append({'accuracy': acc, 'precision': prec, 'recall': rec})
+            fold_scores.append({
+                'accuracy': acc,
+                'precision': prec,
+                'recall': rec,
+                'f1': f1
+            })
+            
+            # Guardar predicciones para validación estadística
+            fold_predictions.append({
+                'y_true': y_val,
+                'y_pred': y_pred,
+                'y_proba': y_proba
+            })
+            
+            logger.info(f"      Fold {fold}: Acc={acc:.3f} Prec={prec:.3f} Rec={rec:.3f} F1={f1:.3f}")
         
-        self.metricas_validacion = {
-            'accuracy': np.mean([s['accuracy'] for s in scores]),
-            'precision': np.mean([s['precision'] for s in scores]),
-            'recall': np.mean([s['recall'] for s in scores]),
-            'std_accuracy': np.std([s['accuracy'] for s in scores]),
-            'n_folds': len(scores)
-        }
-        
-        # Criterio realista
-        if self.metricas_validacion['accuracy'] < 0.505:
-            print(f"      ❌ Accuracy baja: {self.metricas_validacion['accuracy']:.2%}")
+        if len(fold_scores) == 0:
+            logger.warning("    ⚠️ No se completó ningún fold")
             return False
         
-        print(f"      ✅ Acc: {self.metricas_validacion['accuracy']:.2%} | "
-              f"Prec: {self.metricas_validacion['precision']:.2%} | "
-              f"Rec: {self.metricas_validacion['recall']:.2%}")
+        # Métricas promedio
+        self.metricas_validacion = {
+            'accuracy': np.mean([s['accuracy'] for s in fold_scores]),
+            'precision': np.mean([s['precision'] for s in fold_scores]),
+            'recall': np.mean([s['recall'] for s in fold_scores]),
+            'f1': np.mean([s['f1'] for s in fold_scores]),
+            'std_accuracy': np.std([s['accuracy'] for s in fold_scores]),
+            'n_folds': len(fold_scores)
+        }
         
-        # Entrenar modelo final
+        logger.info(f"    Métricas promedio: Acc={self.metricas_validacion['accuracy']:.3f} "
+                   f"Prec={self.metricas_validacion['precision']:.3f} "
+                   f"Rec={self.metricas_validacion['recall']:.3f} "
+                   f"F1={self.metricas_validacion['f1']:.3f}")
+        
+        # Criterio mínimo de accuracy
+        if self.metricas_validacion['accuracy'] < 0.52:
+            logger.warning(f"    ❌ Accuracy insuficiente: {self.metricas_validacion['accuracy']:.2%}")
+            return False
+        
+        # Entrenar modelo final con todos los datos
+        logger.info("    Entrenando modelo final...")
+        
+        X_final = X[self.features]
         self.scaler = RobustScaler()
-        X_scaled = self.scaler.fit_transform(X)
+        X_scaled = self.scaler.fit_transform(X_final)
         
         self.modelo = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=7,
+            n_estimators=150,
+            max_depth=10,
             min_samples_split=15,
             min_samples_leaf=7,
-            max_features=0.5,
+            max_features='sqrt',
             class_weight='balanced',
             random_state=42,
             n_jobs=-1
         )
         
         self.modelo.fit(X_scaled, y)
-        self.features = features
         
         # Feature importance
-        self.feature_importance = dict(zip(features, self.modelo.feature_importances_))
+        self.feature_importance = dict(zip(self.features, self.modelo.feature_importances_))
         
-        # Top features
-        if self.feature_importance:
-            top_features = sorted(self.feature_importance.items(), 
-                                key=lambda x: x[1], reverse=True)[:5]
-            print(f"      🏆 Top features:")
-            for feat, imp in top_features:
-                print(f"        {feat}: {imp:.3f}")
-        
+        logger.info("    ✅ Modelo entrenado exitosamente")
         return True
     
-    def predecir(self, df_actual):
+    def predecir(self, df_actual: pd.DataFrame) -> Optional[Dict]:
         """Predicción en tiempo real"""
-        if self.modelo is None:
+        if self.modelo is None or not self.is_valid:
             return None
         
         if not all(f in df_actual.columns for f in self.features):
+            logger.warning(f"    Faltan features para predicción")
             return None
         
         X = df_actual[self.features].iloc[[-1]]
@@ -503,79 +918,137 @@ class ModeloPrediccion:
         if X.isnull().any().any():
             return None
         
-        X_scaled = self.scaler.transform(X)
-        
-        prediccion_clase = self.modelo.predict(X_scaled)[0]
-        probabilidades = self.modelo.predict_proba(X_scaled)[0]
-        
-        return {
-            'prediccion': int(prediccion_clase),
-            'probabilidad_positiva': probabilidades[1],
-            'probabilidad_negativa': probabilidades[0],
-            'confianza': max(probabilidades)
-        }
+        try:
+            X_scaled = self.scaler.transform(X)
+            
+            prediccion_clase = self.modelo.predict(X_scaled)[0]
+            probabilidades = self.modelo.predict_proba(X_scaled)[0]
+            
+            return {
+                'prediccion': int(prediccion_clase),
+                'probabilidad_positiva': probabilidades[1],
+                'probabilidad_negativa': probabilidades[0],
+                'confianza': max(probabilidades)
+            }
+        except Exception as e:
+            logger.error(f"    Error en predicción: {e}")
+            return None
     
-    def guardar(self, path):
+    def guardar(self, path: Path) -> bool:
+        """Guarda modelo"""
         if self.modelo is None:
             return False
         
-        modelo_data = {
-            'modelo': self.modelo,
-            'scaler': self.scaler,
-            'features': self.features,
-            'metricas': self.metricas_validacion,
-            'feature_importance': self.feature_importance,
-            'horizonte': self.horizonte,
-            'ticker': self.ticker
-        }
-        
-        joblib.dump(modelo_data, path)
-        return True
+        try:
+            modelo_data = {
+                'modelo': self.modelo,
+                'scaler': self.scaler,
+                'features': self.features,
+                'metricas': self.metricas_validacion,
+                'feature_importance': self.feature_importance,
+                'horizonte': self.horizonte,
+                'ticker': self.ticker,
+                'is_valid': self.is_valid,
+                'fecha_entrenamiento': datetime.now().isoformat()
+            }
+            
+            path.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(modelo_data, path)
+            logger.info(f"    💾 Modelo guardado: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"    Error guardando modelo: {e}")
+            return False
     
     @classmethod
-    def cargar(cls, path):
+    def cargar(cls, path: Path, config: TradingConfig) -> 'ModeloPrediccion':
+        """Carga modelo"""
         modelo_data = joblib.load(path)
         
-        instancia = cls(modelo_data['horizonte'], modelo_data['ticker'])
+        instancia = cls(modelo_data['horizonte'], modelo_data['ticker'], config)
         instancia.modelo = modelo_data['modelo']
         instancia.scaler = modelo_data['scaler']
         instancia.features = modelo_data['features']
         instancia.metricas_validacion = modelo_data['metricas']
         instancia.feature_importance = modelo_data.get('feature_importance', {})
+        instancia.is_valid = modelo_data.get('is_valid', False)
         
+        logger.info(f"    📂 Modelo cargado: {path}")
         return instancia
 
 
 # ============================================
-# BACKTESTING (optimizado)
+# BACKTESTING REALISTA
 # ============================================
 
 class Backtester:
+    """Backtesting con costos y slippage realistas"""
     
-    def __init__(self, df, modelos, ticker):
+    def __init__(
+        self, 
+        df: pd.DataFrame, 
+        modelos: Dict[int, ModeloPrediccion], 
+        ticker: str,
+        config: TradingConfig,
+        db: TradingDatabase
+    ):
         self.df = df
         self.modelos = modelos
         self.ticker = ticker
+        self.config = config
+        self.db = db
         self.operaciones = []
     
-    def simular_operacion(self, idx, señal_long, prob, rsi):
-        """Simula operación con SL/TP"""
+    def calcular_costos(
+        self, 
+        precio_entrada: float, 
+        precio_salida: float,
+        es_maker: bool = True
+    ) -> float:
+        """
+        Calcula costos totales de transacción
+        """
+        comision = self.config.COMISION_MAKER if es_maker else self.config.COMISION_TAKER
+        
+        # Comisión entrada + salida
+        costo_comision = comision * 2
+        
+        # Slippage
+        costo_slippage = self.config.SLIPPAGE_PROMEDIO * 2
+        
+        return costo_comision + costo_slippage
+    
+    def simular_operacion(
+        self, 
+        idx: pd.Timestamp, 
+        señal_long: bool, 
+        prob: float,
+        confianza: float
+    ) -> Optional[Dict]:
+        """
+        Simula operación individual con costos realistas
+        """
         precio_entrada = self.df.loc[idx, 'Close']
+        
+        # Aplicar slippage en entrada
+        if señal_long:
+            precio_entrada *= (1 + self.config.SLIPPAGE_PROMEDIO)
+        else:
+            precio_entrada *= (1 - self.config.SLIPPAGE_PROMEDIO)
         
         direccion = 'LONG' if señal_long else 'SHORT'
         
+        # Calcular niveles
         if señal_long:
-            stop_loss = precio_entrada * (1 - TradingConfig.STOP_LOSS_PCT)
-            take_profit = precio_entrada * (1 + TradingConfig.TAKE_PROFIT_PCT)
+            stop_loss = precio_entrada * (1 - self.config.STOP_LOSS_PCT)
+            take_profit = precio_entrada * (1 + self.config.TAKE_PROFIT_PCT)
         else:
-            stop_loss = precio_entrada * (1 + TradingConfig.STOP_LOSS_PCT)
-            take_profit = precio_entrada * (1 - TradingConfig.TAKE_PROFIT_PCT)
+            stop_loss = precio_entrada * (1 + self.config.STOP_LOSS_PCT)
+            take_profit = precio_entrada * (1 - self.config.TAKE_PROFIT_PCT)
         
-        riesgo = abs(precio_entrada - stop_loss)
-        recompensa = abs(take_profit - precio_entrada)
-        ratio_rr = recompensa / riesgo
+        ratio_rr = abs(take_profit - precio_entrada) / abs(precio_entrada - stop_loss)
         
-        if ratio_rr < TradingConfig.RATIO_MINIMO_RR:
+        if ratio_rr < self.config.RATIO_MINIMO_RR:
             return None
         
         # Simular hasta 24 horas
@@ -585,78 +1058,107 @@ class Backtester:
         if max_ventana < 4:
             return None
         
-        precios_futuros = self.df.iloc[idx_pos:idx_pos + max_ventana + 1]['Close'].values
-        highs_futuros = self.df.iloc[idx_pos:idx_pos + max_ventana + 1]['High'].values
-        lows_futuros = self.df.iloc[idx_pos:idx_pos + max_ventana + 1]['Low'].values
+        precios_futuros = self.df.iloc[idx_pos:idx_pos + max_ventana + 1]
         
         resultado = 'TIEMPO'
         velas_hasta_cierre = max_ventana
-        retorno = 0
+        precio_salida = precios_futuros.iloc[-1]['Close']
         
+        # Simular ejecución vela por vela
         for i in range(1, len(precios_futuros)):
-            high = highs_futuros[i]
-            low = lows_futuros[i]
+            high = precios_futuros.iloc[i]['High']
+            low = precios_futuros.iloc[i]['Low']
             
             if señal_long:
+                # Verificar SL primero (más conservador)
                 if low <= stop_loss:
                     resultado = 'SL'
+                    precio_salida = stop_loss
                     velas_hasta_cierre = i
-                    retorno = -TradingConfig.STOP_LOSS_PCT
                     break
                 elif high >= take_profit:
                     resultado = 'TP'
+                    precio_salida = take_profit
                     velas_hasta_cierre = i
-                    retorno = TradingConfig.TAKE_PROFIT_PCT
                     break
             else:
                 if high >= stop_loss:
                     resultado = 'SL'
+                    precio_salida = stop_loss
                     velas_hasta_cierre = i
-                    retorno = -TradingConfig.STOP_LOSS_PCT
                     break
                 elif low <= take_profit:
                     resultado = 'TP'
+                    precio_salida = take_profit
                     velas_hasta_cierre = i
-                    retorno = TradingConfig.TAKE_PROFIT_PCT
                     break
         
+        # Si termina por tiempo
         if resultado == 'TIEMPO':
-            precio_cierre = precios_futuros[velas_hasta_cierre]
+            precio_salida = precios_futuros.iloc[velas_hasta_cierre]['Close']
+            # Aplicar slippage en salida
             if señal_long:
-                retorno = (precio_cierre - precio_entrada) / precio_entrada
+                precio_salida *= (1 - self.config.SLIPPAGE_PROMEDIO)
             else:
-                retorno = (precio_entrada - precio_cierre) / precio_entrada
+                precio_salida *= (1 + self.config.SLIPPAGE_PROMEDIO)
         
-        return {
+        # Calcular retorno BRUTO
+        if señal_long:
+            retorno_bruto = (precio_salida - precio_entrada) / precio_entrada
+        else:
+            retorno_bruto = (precio_entrada - precio_salida) / precio_entrada
+        
+        # Calcular costos
+        costos_totales = self.calcular_costos(precio_entrada, precio_salida)
+        
+        # Retorno NETO
+        retorno_neto = retorno_bruto - costos_totales
+        
+        operacion = {
             'fecha': idx,
             'ticker': self.ticker,
             'direccion': direccion,
             'precio_entrada': precio_entrada,
+            'precio_salida': precio_salida,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
             'ratio_rr': ratio_rr,
             'probabilidad': prob,
-            'rsi': rsi,
+            'confianza': confianza,
             'resultado': resultado,
-            'retorno': retorno,
+            'retorno': retorno_bruto,
+            'comision': costos_totales,
+            'retorno_neto': retorno_neto,
             'velas_hasta_cierre': velas_hasta_cierre
         }
+        
+        return operacion
     
-    def ejecutar(self, fecha_inicio):
-        """Ejecuta backtest"""
+    def ejecutar(self, fecha_inicio: pd.Timestamp) -> Optional[Tuple[Dict, pd.DataFrame]]:
+        """Ejecuta backtest completo"""
         df_backtest = self.df[self.df.index >= fecha_inicio].copy()
         
         if len(df_backtest) < 100:
-            print(f"  ⚠️ Datos insuficientes para backtest")
+            logger.warning(f"  ⚠️ Datos insuficientes para backtest")
             return None
         
-        print(f"  📊 Periodo backtest: {df_backtest.index[0].date()} a {df_backtest.index[-1].date()}")
-        print(f"  📈 Velas disponibles: {len(df_backtest)}")
+        logger.info(f"  📊 Periodo: {df_backtest.index[0].date()} a {df_backtest.index[-1].date()}")
+        logger.info(f"  📈 Velas: {len(df_backtest)}")
+        
+        operaciones_dia = {}
         
         for idx in df_backtest.index[:-24]:
-            predicciones = {}
+            # Límite de operaciones diarias
+            fecha_dia = idx.date()
+            if operaciones_dia.get(fecha_dia, 0) >= self.config.MAX_OPERACIONES_DIARIAS:
+                continue
             
+            # Obtener predicciones de todos los modelos
+            predicciones = {}
             for horizonte, modelo in self.modelos.items():
+                if not modelo.is_valid:
+                    continue
+                
                 pred = modelo.predecir(df_backtest.loc[:idx])
                 if pred:
                     predicciones[horizonte] = pred
@@ -669,9 +1171,11 @@ class Backtester:
             prob_promedio = np.mean(probs_positivas)
             confianza_promedio = np.mean([p['confianza'] for p in predicciones.values()])
             
-            if confianza_promedio < TradingConfig.UMBRAL_CONFIANZA_MIN:
+            # Filtros de confianza
+            if confianza_promedio < self.config.UMBRAL_CONFIANZA_MIN:
                 continue
             
+            # Determinar señal
             if prob_promedio > 0.5:
                 señal_long = True
                 prob_real = prob_promedio
@@ -679,48 +1183,70 @@ class Backtester:
                 señal_long = False
                 prob_real = 1 - prob_promedio
             
-            if prob_real < TradingConfig.UMBRAL_PROBABILIDAD_MIN:
+            # Filtro de probabilidad
+            if prob_real < self.config.UMBRAL_PROBABILIDAD_MIN:
                 continue
-            
-            rsi = df_backtest.loc[idx, 'RSI_14'] if 'RSI_14' in df_backtest.columns else 50
             
             # Filtros RSI
-            if señal_long and rsi > TradingConfig.RSI_EXTREME_HIGH:
+            rsi = df_backtest.loc[idx, 'RSI_14'] if 'RSI_14' in df_backtest.columns else 50
+            
+            if señal_long and rsi > self.config.RSI_EXTREME_HIGH:
                 continue
             
-            if not señal_long and rsi < TradingConfig.RSI_EXTREME_LOW:
+            if not señal_long and rsi < self.config.RSI_EXTREME_LOW:
                 continue
             
-            operacion = self.simular_operacion(idx, señal_long, prob_real, rsi)
+            # Simular operación
+            operacion = self.simular_operacion(idx, señal_long, prob_real, confianza_promedio)
             
             if operacion:
                 self.operaciones.append(operacion)
+                operaciones_dia[fecha_dia] = operaciones_dia.get(fecha_dia, 0) + 1
+                
+                # Guardar en DB
+                self.db.guardar_operacion(operacion)
         
         if not self.operaciones:
-            print(f"  ⚠️ No se generaron operaciones")
+            logger.warning(f"  ⚠️ No se generaron operaciones")
             return None
         
         return self.calcular_metricas()
     
-    def calcular_metricas(self):
+    def calcular_metricas(self) -> Tuple[Dict, pd.DataFrame]:
         """Calcula métricas de rendimiento"""
         df_ops = pd.DataFrame(self.operaciones)
         
+        # Métricas básicas
         n_ops = len(df_ops)
         n_tp = (df_ops['resultado'] == 'TP').sum()
         n_sl = (df_ops['resultado'] == 'SL').sum()
         n_timeout = (df_ops['resultado'] == 'TIEMPO').sum()
         
-        retornos = df_ops['retorno']
-        operaciones_ganadoras = retornos > 0
+        # Usar retornos NETOS
+        retornos_netos = df_ops['retorno_neto']
+        operaciones_ganadoras = retornos_netos > 0
         
         # Profit factor
-        ganancias = retornos[retornos > 0].sum()
-        perdidas = abs(retornos[retornos < 0].sum())
+        ganancias = retornos_netos[retornos_netos > 0].sum()
+        perdidas = abs(retornos_netos[retornos_netos < 0].sum())
         profit_factor = ganancias / perdidas if perdidas > 0 else np.inf
         
         # Equity curve
-        equity_curve = (1 + retornos).cumprod()
+        equity_curve = (1 + retornos_netos).cumprod()
+        
+        # Max drawdown
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve / running_max - 1)
+        max_drawdown = drawdown.min()
+        
+        # Sharpe ratio
+        sharpe_ratio = retornos_netos.mean() / retornos_netos.std() * np.sqrt(365*24) if retornos_netos.std() > 0 else 0
+        
+        # Test estadístico
+        t_stat, p_value = stats.ttest_1samp(retornos_netos, 0)
+        
+        # Costos totales
+        costos_totales = df_ops['comision'].sum()
         
         metricas = {
             'n_operaciones': n_ops,
@@ -728,148 +1254,174 @@ class Backtester:
             'hit_tp_rate': n_tp / n_ops,
             'hit_sl_rate': n_sl / n_ops,
             'timeout_rate': n_timeout / n_ops,
-            'retorno_total': retornos.sum(),
-            'retorno_promedio': retornos.mean(),
-            'retorno_mediano': retornos.median(),
-            'mejor_operacion': retornos.max(),
-            'peor_operacion': retornos.min(),
-            'promedio_ganador': retornos[retornos > 0].mean() if retornos[retornos > 0].any() else 0,
-            'promedio_perdedor': retornos[retornos < 0].mean() if retornos[retornos < 0].any() else 0,
+            'retorno_total_bruto': df_ops['retorno'].sum(),
+            'retorno_total_neto': retornos_netos.sum(),
+            'retorno_promedio': retornos_netos.mean(),
+            'retorno_mediano': retornos_netos.median(),
+            'mejor_operacion': retornos_netos.max(),
+            'peor_operacion': retornos_netos.min(),
+            'promedio_ganador': retornos_netos[retornos_netos > 0].mean() if (retornos_netos > 0).any() else 0,
+            'promedio_perdedor': retornos_netos[retornos_netos < 0].mean() if (retornos_netos < 0).any() else 0,
             'profit_factor': profit_factor,
-            'max_drawdown': (equity_curve / equity_curve.cummax() - 1).min(),
-            'sharpe_ratio': retornos.mean() / retornos.std() * np.sqrt(365*24) if retornos.std() > 0 else 0,
+            'max_drawdown': max_drawdown,
+            'sharpe_ratio': sharpe_ratio,
             'equity_final': equity_curve.iloc[-1] if len(equity_curve) > 0 else 1,
             'duracion_promedio': df_ops['velas_hasta_cierre'].mean(),
+            'costos_totales': costos_totales,
+            'p_value': p_value,
+            't_statistic': t_stat
         }
         
         return metricas, df_ops
 
 
 # ============================================
-# SISTEMA COMPLETO
+# SISTEMA PRINCIPAL
 # ============================================
 
 class SistemaTradingTicker:
+    """Sistema completo para un ticker"""
     
-    def __init__(self, ticker):
+    def __init__(self, ticker: str, config: TradingConfig, db: TradingDatabase):
         self.ticker = ticker
+        self.config = config
+        self.db = db
         self.modelos = {}
-        self.fechas = TradingConfig.get_fechas()
+        self.fechas = config.get_fechas()
         self.df_historico = None
         self.metricas_backtest = None
     
-    def descargar_datos(self):
-        """Descarga datos históricos respetando límites"""
-        print(f"\n{'='*80}")
-        print(f"📥 DESCARGANDO {self.ticker}")
-        print(f"{'='*80}")
+    def descargar_datos(self) -> bool:
+        """Descarga datos históricos"""
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📥 DESCARGANDO {self.ticker}")
+        logger.info(f"{'='*80}")
         
         try:
-            # Intentar descarga directa primero
             df = YahooDataDownloader.descargar_con_reintentos(
                 self.ticker,
                 self.fechas['inicio_entrenamiento'],
                 self.fechas['actual'],
-                TradingConfig.INTERVALO
+                self.config.INTERVALO
             )
             
             if df.empty:
-                print(f"  ⚠️ Descarga directa falló, intentando por partes...")
-                df = YahooDataDownloader.descargar_por_partes(
-                    self.ticker,
-                    self.fechas['inicio_entrenamiento'],
-                    self.fechas['actual'],
-                    TradingConfig.INTERVALO
-                )
-            
-            if df.empty:
-                print(f"  ❌ No se pudieron descargar datos")
+                logger.error(f"  ❌ No se pudieron descargar datos")
                 return False
             
             self.df_historico = df
-            print(f"  ✅ Descargado: {len(df)} velas")
-            print(f"     Periodo: {df.index[0].date()} a {df.index[-1].date()}")
-            print(f"     Precio actual: ${df['Close'].iloc[-1]:,.2f}")
+            logger.info(f"  ✅ {len(df)} velas descargadas")
+            logger.info(f"     Periodo: {df.index[0].date()} → {df.index[-1].date()}")
+            logger.info(f"     Precio actual: ${df['Close'].iloc[-1]:,.2f}")
             
             return True
             
         except Exception as e:
-            print(f"  ❌ Error crítico descargando datos: {e}")
+            logger.error(f"  ❌ Error descargando datos: {e}")
             return False
     
-    def entrenar_modelos(self):
+    def entrenar_modelos(self) -> bool:
         """Entrena modelos para cada horizonte"""
-        print(f"\n🎯 ENTRENANDO MODELOS - {self.ticker}")
-        print("-" * 80)
+        logger.info(f"\n🎯 ENTRENANDO MODELOS - {self.ticker}")
+        logger.info("-" * 80)
         
         if self.df_historico is None:
             return False
         
-        # Usar datos hasta inicio de backtest
-        df_train = self.df_historico[self.df_historico.index < self.fechas['inicio_backtest']].copy()
+        # Datos hasta inicio de backtest
+        df_train = self.df_historico[
+            self.df_historico.index < self.fechas['inicio_backtest']
+        ].copy()
         
-        print(f"  📊 Datos entrenamiento: {len(df_train)} velas")
-        print(f"  📅 Periodo: {df_train.index[0].date()} a {df_train.index[-1].date()}")
+        logger.info(f"  📊 Datos entrenamiento: {len(df_train)} velas")
+        logger.info(f"  📅 Periodo: {df_train.index[0].date()} → {df_train.index[-1].date()}")
         
         modelos_entrenados = 0
         
-        for horizonte in TradingConfig.HORIZONTES[:2]:  # Solo 1h y 2h para empezar
-            print(f"\n  🔄 Horizonte {horizonte}h...")
+        for horizonte in self.config.HORIZONTES:
+            logger.info(f"\n  🔄 Horizonte {horizonte}h...")
             
             try:
                 df_prep, features = EtiquetadoDatos.preparar_dataset_ml(df_train, horizonte)
                 etiqueta_col = f'etiqueta_{horizonte}h'
                 
-                # Verificar distribución
-                etiquetas = df_prep[etiqueta_col].dropna()
-                if len(etiquetas) == 0:
-                    print(f"    ⚠️ No hay etiquetas válidas")
-                    continue
+                modelo = ModeloPrediccion(horizonte, self.ticker, self.config)
                 
-                dist = etiquetas.value_counts()
-                print(f"    Distribución: LONG={dist.get(1, 0)}, SHORT={dist.get(0, 0)}")
-                
-                # Seleccionar features importantes
-                if len(features) > 10:
-                    # Calcular correlación con etiquetas
-                    correlations = []
-                    for feat in features:
-                        corr = df_prep[feat].corr(df_prep[etiqueta_col])
-                        if not pd.isna(corr):
-                            correlations.append((feat, abs(corr)))
-                    
-                    if correlations:
-                        correlations.sort(key=lambda x: x[1], reverse=True)
-                        features = [feat for feat, _ in correlations[:10]]
-                
-                modelo = ModeloPrediccion(horizonte, self.ticker)
                 if modelo.entrenar_walk_forward(df_prep, features, etiqueta_col):
-                    self.modelos[horizonte] = modelo
-                    modelos_entrenados += 1
+                    # Validar con backtest interno
+                    logger.info("    Validando con backtest...")
+                    
+                    df_val = self.df_historico[
+                        (self.df_historico.index >= self.fechas['inicio_validacion']) &
+                        (self.df_historico.index < self.fechas['inicio_backtest'])
+                    ].copy()
+                    
+                    if len(df_val) > 100:
+                        df_val_prep, _ = EtiquetadoDatos.preparar_dataset_ml(df_val, horizonte)
+                        
+                        backtester_val = Backtester(
+                            df_val_prep, 
+                            {horizonte: modelo}, 
+                            self.ticker,
+                            self.config,
+                            self.db
+                        )
+                        
+                        resultado_val = backtester_val.ejecutar(self.fechas['inicio_validacion'])
+                        
+                        if resultado_val:
+                            metricas_val, _ = resultado_val
+                            
+                            # Validación estadística
+                            retornos_val = pd.DataFrame(backtester_val.operaciones)['retorno_neto'].values
+                            
+                            es_valido, stats_val = modelo.validar_estadisticamente(retornos_val)
+                            
+                            if es_valido:
+                                modelo.is_valid = True
+                                self.modelos[horizonte] = modelo
+                                modelos_entrenados += 1
+                                
+                                # Guardar métricas en DB
+                                self.db.guardar_metricas(
+                                    self.ticker, 
+                                    horizonte, 
+                                    {**metricas_val, **stats_val}
+                                )
+                                
+                                logger.info(f"    ✅ Modelo validado y aceptado")
+                            else:
+                                logger.warning(f"    ❌ Modelo no pasó validación estadística")
+                        else:
+                            logger.warning(f"    ⚠️ Validación falló (sin operaciones)")
                     
             except Exception as e:
-                print(f"    ❌ Error entrenando horizonte {horizonte}h: {e}")
+                logger.error(f"    ❌ Error entrenando: {e}", exc_info=True)
                 continue
         
-        print(f"\n  ✅ Modelos entrenados: {modelos_entrenados}/{len(TradingConfig.HORIZONTES[:2])}")
+        logger.info(f"\n  ✅ Modelos válidos: {modelos_entrenados}/{len(self.config.HORIZONTES)}")
         return modelos_entrenados > 0
     
-    def ejecutar_backtest(self):
-        """Ejecuta backtest con los modelos entrenados"""
-        print(f"\n🔬 BACKTESTING - {self.ticker}")
-        print("-" * 80)
+    def ejecutar_backtest(self) -> bool:
+        """Ejecuta backtest final"""
+        logger.info(f"\n🔬 BACKTESTING FINAL - {self.ticker}")
+        logger.info("-" * 80)
         
         if not self.modelos:
-            print("  ❌ No hay modelos disponibles")
+            logger.error("  ❌ No hay modelos válidos")
             return False
         
         # Preparar datos completos
-        df_completo, _ = EtiquetadoDatos.preparar_dataset_ml(
-            self.df_historico,
-            1
+        df_completo, _ = EtiquetadoDatos.preparar_dataset_ml(self.df_historico, 1)
+        
+        backtester = Backtester(
+            df_completo, 
+            self.modelos, 
+            self.ticker,
+            self.config,
+            self.db
         )
         
-        backtester = Backtester(df_completo, self.modelos, self.ticker)
         resultado = backtester.ejecutar(self.fechas['inicio_backtest'])
         
         if resultado is None:
@@ -879,219 +1431,120 @@ class SistemaTradingTicker:
         self.metricas_backtest = metricas
         
         # Mostrar resultados
-        print(f"\n  📊 RESULTADOS:")
-        print(f"    Operaciones: {metricas['n_operaciones']}")
-        print(f"    Win rate: {metricas['tasa_exito']:.2%}")
-        print(f"    Retorno total: {metricas['retorno_total']:.2%}")
-        print(f"    Profit Factor: {metricas['profit_factor']:.2f}")
-        print(f"    Sharpe Ratio: {metricas['sharpe_ratio']:.2f}")
-        print(f"    Max Drawdown: {metricas['max_drawdown']:.2%}")
+        logger.info(f"\n  📊 RESULTADOS:")
+        logger.info(f"    Operaciones: {metricas['n_operaciones']}")
+        logger.info(f"    Win rate: {metricas['tasa_exito']:.2%}")
+        logger.info(f"    Retorno bruto: {metricas['retorno_total_bruto']:.2%}")
+        logger.info(f"    Retorno NETO: {metricas['retorno_total_neto']:.2%}")
+        logger.info(f"    Costos totales: {metricas['costos_totales']:.2%}")
+        logger.info(f"    Profit Factor: {metricas['profit_factor']:.2f}")
+        logger.info(f"    Sharpe Ratio: {metricas['sharpe_ratio']:.2f}")
+        logger.info(f"    Max Drawdown: {metricas['max_drawdown']:.2%}")
+        logger.info(f"    p-value: {metricas['p_value']:.4f}")
         
         if len(df_ops) > 0:
             long_ops = df_ops[df_ops['direccion'] == 'LONG']
             short_ops = df_ops[df_ops['direccion'] == 'SHORT']
             
             if len(long_ops) > 0:
-                win_rate_long = (long_ops['retorno'] > 0).sum() / len(long_ops)
-                print(f"    LONG: {len(long_ops)} ops, Win rate: {win_rate_long:.1%}")
+                wr_long = (long_ops['retorno_neto'] > 0).sum() / len(long_ops)
+                logger.info(f"    LONG: {len(long_ops)} ops, Win rate: {wr_long:.1%}")
             
             if len(short_ops) > 0:
-                win_rate_short = (short_ops['retorno'] > 0).sum() / len(short_ops)
-                print(f"    SHORT: {len(short_ops)} ops, Win rate: {win_rate_short:.1%}")
+                wr_short = (short_ops['retorno_neto'] > 0).sum() / len(short_ops)
+                logger.info(f"    SHORT: {len(short_ops)} ops, Win rate: {wr_short:.1%}")
         
         return True
     
-    def es_viable(self):
-        """Evalúa si el sistema es viable"""
+    def es_viable(self) -> Tuple[bool, int]:
+        """Evalúa viabilidad del sistema"""
         if self.metricas_backtest is None:
             return False, 0
         
         m = self.metricas_backtest
         
-        criterios = []
-        criterios.append(('Operaciones >= 5', m['n_operaciones'] >= 5))
-        criterios.append(('Win rate > 45%', m['tasa_exito'] > 0.45))
-        criterios.append(('Profit factor > 1.2', m['profit_factor'] > 1.2))
-        criterios.append(('Retorno total > 0%', m['retorno_total'] > 0))
-        criterios.append(('Equity final > 1.0', m['equity_final'] > 1.0))
-        criterios.append(('Max DD < 20%', abs(m['max_drawdown']) < 0.20))
+        criterios = [
+            ('Operaciones >= 10', m['n_operaciones'] >= 10),
+            ('Win rate > 45%', m['tasa_exito'] > 0.45),
+            ('Profit factor > 1.5', m['profit_factor'] > 1.5),
+            ('Retorno neto > 0%', m['retorno_total_neto'] > 0),
+            ('Sharpe > 1.0', m['sharpe_ratio'] > 1.0),
+            ('Max DD < 15%', abs(m['max_drawdown']) < 0.15),
+            ('p-value < 0.05', m['p_value'] < 0.05)
+        ]
         
-        criterios_cumplidos = sum([c[1] for c in criterios])
-        viable = criterios_cumplidos >= 4
+        cumplidos = sum([c[1] for c in criterios])
+        viable = cumplidos >= 5  # Al menos 5 de 7
         
-        print(f"\n  📋 EVALUACIÓN:")
+        logger.info(f"\n  📋 EVALUACIÓN:")
         for nombre, resultado in criterios:
-            print(f"    {'✅' if resultado else '❌'} {nombre}")
+            logger.info(f"    {'✅' if resultado else '❌'} {nombre}")
         
-        return viable, criterios_cumplidos
+        return viable, cumplidos
     
-    def analizar_tiempo_real(self):
-        """Analiza condiciones actuales"""
-        if not self.modelos:
-            return None
-        
-        try:
-            # Descargar últimos 7 días
-            fecha_inicio = datetime.now(TradingConfig.TIMEZONE) - timedelta(days=7)
-            
-            df_reciente = YahooDataDownloader.descargar_con_reintentos(
-                self.ticker,
-                fecha_inicio,
-                datetime.now(TradingConfig.TIMEZONE),
-                TradingConfig.INTERVALO
-            )
-            
-            if df_reciente.empty:
-                return None
-            
-            # Calcular features
-            df_reciente = IndicadoresTecnicos.calcular_features(df_reciente)
-            
-            # Obtener predicciones
-            predicciones = {}
-            for horizonte, modelo in self.modelos.items():
-                pred = modelo.predecir(df_reciente)
-                if pred:
-                    predicciones[horizonte] = pred
-            
-            if not predicciones:
-                return None
-            
-            # Promediar
-            probs_positivas = [p['probabilidad_positiva'] for p in predicciones.values()]
-            prob_promedio = np.mean(probs_positivas)
-            confianza_promedio = np.mean([p['confianza'] for p in predicciones.values()])
-            
-            if confianza_promedio < TradingConfig.UMBRAL_CONFIANZA_MIN:
-                return None
-            
-            if prob_promedio > 0.5:
-                señal = "LONG"
-                prob_real = prob_promedio
-            else:
-                señal = "SHORT"
-                prob_real = 1 - prob_promedio
-            
-            if prob_real < TradingConfig.UMBRAL_PROBABILIDAD_MIN:
-                return None
-            
-            # Obtener datos actuales
-            ultima_vela = df_reciente.iloc[-1]
-            precio = ultima_vela['Close']
-            rsi = ultima_vela.get('RSI_14', 50)
-            
-            # Filtros
-            if señal == "LONG" and rsi > TradingConfig.RSI_EXTREME_HIGH:
-                return None
-            
-            if señal == "SHORT" and rsi < TradingConfig.RSI_EXTREME_LOW:
-                return None
-            
-            # Calcular niveles
-            if señal == 'LONG':
-                sl = precio * (1 - TradingConfig.STOP_LOSS_PCT)
-                tp = precio * (1 + TradingConfig.TAKE_PROFIT_PCT)
-            else:
-                sl = precio * (1 + TradingConfig.STOP_LOSS_PCT)
-                tp = precio * (1 - TradingConfig.TAKE_PROFIT_PCT)
-            
-            ratio_rr = abs(tp - precio) / abs(precio - sl)
-            
-            if ratio_rr < TradingConfig.RATIO_MINIMO_RR:
-                return None
-            
-            # Fuerza de señal
-            fuerza = "DÉBIL"
-            if prob_real > 0.6:
-                fuerza = "FUERTE"
-            elif prob_real > 0.55:
-                fuerza = "MEDIA"
-            
-            estado_rsi = "NEUTRO"
-            if rsi < 30:
-                estado_rsi = "OVERSOLD"
-            elif rsi > 70:
-                estado_rsi = "OVERBOUGHT"
-            
-            tendencia = "ALCISTA" if ultima_vela.get('tendencia', 0) == 1 else "BAJISTA"
-            
-            return {
-                'ticker': self.ticker,
-                'fecha': datetime.now(TradingConfig.TIMEZONE),
-                'precio': precio,
-                'señal': señal,
-                'probabilidad': prob_real,
-                'confianza': confianza_promedio,
-                'fuerza': fuerza,
-                'stop_loss': sl,
-                'take_profit': tp,
-                'ratio_rr': ratio_rr,
-                'rsi': rsi,
-                'estado_rsi': estado_rsi,
-                'tendencia': tendencia,
-                'n_modelos': len(predicciones)
-            }
-        
-        except Exception as e:
-            print(f"  ❌ Error análisis tiempo real: {e}")
-            return None
-    
-    def guardar_modelos(self):
+    def guardar_modelos(self) -> bool:
         """Guarda modelos entrenados"""
         if not self.modelos:
             return False
         
-        path_ticker = TradingConfig.MODELOS_DIR / self.ticker
+        path_ticker = self.config.MODELOS_DIR / self.ticker
         path_ticker.mkdir(parents=True, exist_ok=True)
         
         for horizonte, modelo in self.modelos.items():
-            path_modelo = path_ticker / f"modelo_{horizonte}h.pkl"
-            modelo.guardar(path_modelo)
+            if modelo.is_valid:
+                path_modelo = path_ticker / f"modelo_{horizonte}h.pkl"
+                modelo.guardar(path_modelo)
         
         if self.metricas_backtest:
             path_metricas = path_ticker / "metricas_backtest.json"
             with open(path_metricas, 'w') as f:
-                json.dump(self.metricas_backtest, f, indent=2)
+                # Convertir numpy types a Python types
+                metricas_json = {}
+                for k, v in self.metricas_backtest.items():
+                    if isinstance(v, (np.integer, np.floating)):
+                        metricas_json[k] = float(v)
+                    else:
+                        metricas_json[k] = v
+                
+                json.dump(metricas_json, f, indent=2)
         
-        print(f"  💾 Modelos guardados en {path_ticker}")
+        logger.info(f"  💾 Modelos guardados en {path_ticker}")
         return True
 
 
 # ============================================
-# UTILIDADES (sin cambios)
+# NOTIFICACIONES
 # ============================================
 
-def cargar_ultima_senal():
-    """Carga la última señal enviada"""
-    if os.path.exists("ultima_senal.json"):
-        with open("ultima_senal.json") as f:
-            return json.load(f)
-    return None
-
-def guardar_ultima_senal(senal):
-    """Guarda la señal enviada"""
-    with open("ultima_senal.json", "w") as f:
-        json.dump(senal, f, indent=2)
-
-def enviar_telegram(mensaje):
+def enviar_telegram(mensaje: str, config: TradingConfig) -> bool:
     """Envía mensaje por Telegram"""
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     
     if not token or not chat_id:
-        print("  ⚠️ Telegram no configurado")
-        return
+        logger.warning("  ⚠️ Telegram no configurado (TELEGRAM_TOKEN y TELEGRAM_CHAT_ID)")
+        return False
     
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        r = requests.post(url, data={"chat_id": chat_id, "text": mensaje}, timeout=10)
+        data = {
+            "chat_id": chat_id,
+            "text": mensaje,
+            "parse_mode": "HTML"
+        }
         
-        if r.status_code == 200:
-            print(f"  📨 Telegram enviado")
+        response = requests.post(url, data=data, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info("  📨 Telegram enviado")
+            return True
         else:
-            print(f"  ⚠️ Error Telegram: {r.status_code}")
+            logger.warning(f"  ⚠️ Error Telegram: {response.status_code}")
+            return False
+            
     except Exception as e:
-        print(f"  ⚠️ Error enviando Telegram: {e}")
+        logger.error(f"  ❌ Error enviando Telegram: {e}")
+        return False
 
 
 # ============================================
@@ -1099,159 +1552,111 @@ def enviar_telegram(mensaje):
 # ============================================
 
 def main():
-    """Sistema principal corregido para límites de Yahoo"""
-    print("🚀 SISTEMA DE TRADING - VERSIÓN CORREGIDA")
-    print("=" * 80)
-    print("✅ Respeta límites de Yahoo Finance (730 días para 1h)")
-    print("✅ Descarga inteligente por partes")
-    print("✅ Configuración realista")
-    print("=" * 80)
+    """Sistema principal mejorado"""
+    logger.info("🚀 SISTEMA DE TRADING ALGORÍTMICO v2.0")
+    logger.info("=" * 80)
+    logger.info("✅ Validación estadística robusta")
+    logger.info("✅ Costos de transacción realistas")
+    logger.info("✅ Logging estructurado")
+    logger.info("✅ Base de datos SQLite")
+    logger.info("=" * 80)
     
-    fechas = TradingConfig.get_fechas()
-    print(f"\n📅 Configuración:")
-    print(f"  Fecha actual: {fechas['actual'].strftime('%Y-%m-%d %H:%M')}")
-    print(f"  Inicio entrenamiento: {fechas['inicio_entrenamiento'].strftime('%Y-%m-%d')}")
-    print(f"  Inicio backtest: {fechas['inicio_backtest'].strftime('%Y-%m-%d')}")
-    print(f"  Límite Yahoo: {fechas['fecha_max_retroceso'].strftime('%Y-%m-%d')}")
-    print(f"  Días totales: {(fechas['actual'] - fechas['inicio_entrenamiento']).days}")
+    # Inicializar configuración
+    config = TradingConfig()
+    config.validate()
+    
+    # Inicializar DB
+    db = TradingDatabase(config.DB_PATH)
+    
+    # Mostrar fechas
+    fechas = config.get_fechas()
+    logger.info(f"\n📅 Configuración:")
+    logger.info(f"  Fecha actual: {fechas['actual'].strftime('%Y-%m-%d %H:%M')}")
+    logger.info(f"  Inicio entrenamiento: {fechas['inicio_entrenamiento'].strftime('%Y-%m-%d')}")
+    logger.info(f"  Inicio validación: {fechas['inicio_validacion'].strftime('%Y-%m-%d')}")
+    logger.info(f"  Inicio backtest: {fechas['inicio_backtest'].strftime('%Y-%m-%d')}")
+    logger.info(f"  Días totales: {(fechas['actual'] - fechas['inicio_entrenamiento']).days}")
     
     # Crear directorio para modelos
-    TradingConfig.MODELOS_DIR.mkdir(exist_ok=True)
+    config.MODELOS_DIR.mkdir(exist_ok=True)
     
     resultados_globales = {}
     
-    for ticker in TradingConfig.ACTIVOS:
-        sistema = SistemaTradingTicker(ticker)
-        
-        # 1. Descargar datos
-        print(f"\n{'='*80}")
-        print(f"📊 PROCESANDO {ticker}")
-        print(f"{'='*80}")
-        
-        if not sistema.descargar_datos():
-            print(f"  ⏭️ Saltando {ticker}...")
-            continue
-        
-        # 2. Entrenar modelos
-        if not sistema.entrenar_modelos():
-            print(f"  ⚠️ No se pudieron entrenar modelos para {ticker}")
-            continue
-        
-        # 3. Backtest
-        if not sistema.ejecutar_backtest():
-            print(f"  ⚠️ Backtest falló para {ticker}")
-            continue
-        
-        # 4. Evaluar viabilidad
-        viable, criterios = sistema.es_viable()
-        
-        print(f"\n  {'✅ VIABLE' if viable else '❌ NO VIABLE'}")
-        print(f"  Criterios cumplidos: {criterios}/6")
-        
-        señal_actual = None
-        
-        # 5. Análisis tiempo real si es viable
-        if viable:
-            print(f"\n  🔍 Analizando condiciones actuales...")
-            señal_actual = sistema.analizar_tiempo_real()
+    # Procesar cada activo
+    for ticker in config.ACTIVOS:
+        try:
+            sistema = SistemaTradingTicker(ticker, config, db)
             
-            if señal_actual:
-                print(f"\n  🚨 SEÑAL DETECTADA: {señal_actual['señal']} ({señal_actual['fuerza']})")
-                print(f"    Probabilidad: {señal_actual['probabilidad']:.2%}")
-                print(f"    Precio: ${señal_actual['precio']:,.2f}")
-                print(f"    RSI: {señal_actual['rsi']:.0f} ({señal_actual['estado_rsi']})")
-                print(f"    R:R = {señal_actual['ratio_rr']:.2f}")
-                
-                # Verificar si es señal nueva
-                ultima = cargar_ultima_senal()
-                es_nueva = True
-                
-                if ultima:
-                    if (ultima.get("ticker") == ticker and 
-                        ultima.get("señal") == señal_actual["señal"]):
-                        try:
-                            fecha_ultima = datetime.fromisoformat(ultima["fecha"])
-                            if datetime.now(TradingConfig.TIMEZONE) - fecha_ultima < timedelta(hours=6):
-                                es_nueva = False
-                                print("  🔁 Señal repetida (< 6 horas)")
-                        except:
-                            pass
-                
-                if es_nueva:
-                    # Enviar Telegram
-                    emoji = "📈" if señal_actual['señal'] == "LONG" else "📉"
-                    mensaje = (
-                        f"{emoji} {ticker} - {señal_actual['señal']} ({señal_actual['fuerza']})\n"
-                        f"📊 Probabilidad: {señal_actual['probabilidad']:.1%}\n"
-                        f"💰 Precio: ${señal_actual['precio']:,.2f}\n"
-                        f"🛑 Stop Loss: ${señal_actual['stop_loss']:,.2f}\n"
-                        f"🎯 Take Profit: ${señal_actual['take_profit']:,.2f}\n"
-                        f"⚖️ Ratio R:R: {señal_actual['ratio_rr']:.2f}\n"
-                        f"📈 RSI: {señal_actual['rsi']:.0f} ({señal_actual['estado_rsi']})\n"
-                        f"⏰ {señal_actual['fecha'].strftime('%Y-%m-%d %H:%M')}"
-                    )
-                    
-                    enviar_telegram(mensaje)
-                    
-                    # Guardar señal
-                    guardar_ultima_senal({
-                        "ticker": ticker,
-                        "señal": señal_actual["señal"],
-                        "fecha": señal_actual["fecha"].isoformat(),
-                        "precio": señal_actual["precio"],
-                        "probabilidad": señal_actual["probabilidad"]
-                    })
-            else:
-                print("  ℹ️ No hay señal en este momento")
-        
-        # 6. Guardar modelos si es viable
-        if viable:
-            sistema.guardar_modelos()
-        
-        # Guardar resultados
-        resultados_globales[ticker] = {
-            'viable': viable,
-            'criterios': criterios,
-            'metricas': sistema.metricas_backtest,
-            'señal_actual': señal_actual
-        }
+            # 1. Descargar datos
+            if not sistema.descargar_datos():
+                logger.warning(f"  ⏭️ Saltando {ticker}...")
+                continue
+            
+            # 2. Entrenar modelos
+            if not sistema.entrenar_modelos():
+                logger.warning(f"  ⚠️ No se entrenaron modelos para {ticker}")
+                continue
+            
+            # 3. Backtest
+            if not sistema.ejecutar_backtest():
+                logger.warning(f"  ⚠️ Backtest falló para {ticker}")
+                continue
+            
+            # 4. Evaluar viabilidad
+            viable, criterios = sistema.es_viable()
+            
+            logger.info(f"\n  {'✅ SISTEMA VIABLE' if viable else '❌ SISTEMA NO VIABLE'}")
+            logger.info(f"  Criterios cumplidos: {criterios}/7")
+            
+            # 5. Guardar si es viable
+            if viable:
+                sistema.guardar_modelos()
+            
+            # Guardar resultados
+            resultados_globales[ticker] = {
+                'viable': viable,
+                'criterios': criterios,
+                'metricas': sistema.metricas_backtest
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error procesando {ticker}: {e}", exc_info=True)
+            continue
     
     # Resumen final
-    print(f"\n{'='*80}")
-    print("📊 RESUMEN FINAL")
-    print(f"{'='*80}")
+    logger.info(f"\n{'='*80}")
+    logger.info("📊 RESUMEN FINAL")
+    logger.info(f"{'='*80}")
     
     viables = [t for t, r in resultados_globales.items() if r['viable']]
-    con_senal = [t for t, r in resultados_globales.items() if r.get('señal_actual')]
     
-    print(f"\n  Activos procesados: {len(resultados_globales)}")
-    print(f"  Sistemas viables: {len(viables)}")
-    print(f"  Señales activas: {len(con_senal)}")
+    logger.info(f"\n  Activos procesados: {len(resultados_globales)}")
+    logger.info(f"  Sistemas viables: {len(viables)}")
     
     if viables:
-        print(f"\n  ✅ SISTEMAS VIABLES:")
+        logger.info(f"\n  ✅ SISTEMAS VIABLES:")
         for ticker in viables:
             r = resultados_globales[ticker]
             m = r['metricas']
-            print(f"\n    {ticker}:")
-            print(f"      Operaciones: {m['n_operaciones']}")
-            print(f"      Win rate: {m['tasa_exito']:.1%}")
-            print(f"      Retorno: {m['retorno_total']:.2%}")
-            print(f"      Profit Factor: {m['profit_factor']:.2f}")
+            logger.info(f"\n    {ticker}:")
+            logger.info(f"      Operaciones: {m['n_operaciones']}")
+            logger.info(f"      Win rate: {m['tasa_exito']:.1%}")
+            logger.info(f"      Retorno neto: {m['retorno_total_neto']:.2%}")
+            logger.info(f"      Sharpe: {m['sharpe_ratio']:.2f}")
+            logger.info(f"      Profit Factor: {m['profit_factor']:.2f}")
+            logger.info(f"      p-value: {m['p_value']:.4f}")
     
-    if con_senal:
-        print(f"\n  🚨 SEÑALES ACTIVAS:")
-        for ticker in con_senal:
-            s = resultados_globales[ticker]['señal_actual']
-            emoji = "📈" if s['señal'] == "LONG" else "📉"
-            print(f"    {emoji} {ticker}: {s['señal']} @ ${s['precio']:,.2f}")
-    
-    print(f"\n{'='*80}")
-    print("✅ Proceso completado")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info("✅ Proceso completado")
+    logger.info(f"{'='*80}\n")
     
     return resultados_globales
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        resultados = main()
+    except KeyboardInterrupt:
+        logger.info("\n⚠️ Proceso interrumpido por usuario")
+    except Exception as e:
+        logger.error(f"\n❌ Error fatal: {e}", exc_info=True)
